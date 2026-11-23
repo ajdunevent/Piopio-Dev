@@ -1,0 +1,14 @@
+[package]
+name = "piopio-call"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1.0.105"
+gstreamer = "0.24.5"
+gstreamer-sdp = "0.24.5"
+gstreamer-webrtc = "0.24.5"
