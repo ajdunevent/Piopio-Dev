@@ -428,7 +428,31 @@ impl Window {
                 let Some(this) = weak.upgrade() else { break };
                 let path: OwnedObjectPath = path;
                 let has = |name: &str| interfaces.iter().any(|i| i == name);
-                if is_added && has("net.dunevent.Piopio.Conversation") {
+                if is_added && crate::calls::is_call(&interfaces) {
+                    // Only ringing incoming calls open by themselves;
+                    // our own outgoing ones are opened where they start.
+                    let bus = client::bus().await.ok();
+                    let p = path.clone();
+                    let ringing = match bus {
+                        Some(bus) => run(async move {
+                            let proxy = piopio_dbus::CallProxy::builder(&bus)
+                                .path(p)?
+                                .build()
+                                .await?;
+                            Ok::<_, zbus::Error>(
+                                proxy.direction().await? == "incoming"
+                                    && proxy.state().await? == "ringing",
+                            )
+                        })
+                        .await
+                        .unwrap_or(false),
+                        None => false,
+                    };
+                    if ringing {
+                        this.window.present();
+                        crate::calls::open(&this, path).await;
+                    }
+                } else if is_added && has("net.dunevent.Piopio.Conversation") {
                     this.add_conversation(path).await;
                 } else if is_added && has("net.dunevent.Piopio.Account") {
                     this.add_account_info(path).await;

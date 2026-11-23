@@ -3,6 +3,7 @@
 //! The UI holds no protocol state and no connections of its own. Closing the
 //! window ends this process and frees its memory; the daemon keeps running.
 
+mod calls;
 mod chat;
 mod client;
 mod dialogs;
@@ -51,6 +52,7 @@ row.unread .title { font-weight: bold; }
 }
 .reactions { margin: 0 6px; }
 .attachment-picture { border-radius: 8px; }
+.large-button { min-width: 56px; min-height: 56px; }
 .attachment { min-width: 200px; }
 button.reaction { padding: 0 8px; min-height: 24px; border-radius: 999px; font-size: smaller; }
 .fingerprint { font-family: monospace; }
@@ -198,6 +200,25 @@ fn main() -> glib::ExitCode {
             });
         });
         app.add_action(&status);
+    }
+    {
+        // From a call notification.
+        let ensure = ensure.clone();
+        action(
+            "open-call",
+            Rc::new(move |app, p| {
+                let w = ensure(app);
+                w.window.present();
+                if let Some(path) = p
+                    .and_then(|p| p.get::<String>())
+                    .and_then(|p| zbus::zvariant::OwnedObjectPath::try_from(p).ok())
+                {
+                    let w = w.clone();
+                    glib::spawn_future_local(async move { calls::open(&w, path).await });
+                }
+            }),
+            Some(glib::VariantTy::STRING),
+        );
     }
     app.set_accels_for_action("app.new-chat", &["<Control>n"]);
     app.set_accels_for_action("app.join-room", &["<Control>j"]);

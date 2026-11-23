@@ -19,6 +19,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --device=dri
+  # Calls: the microphone and speakers.
+  - --socket=pulseaudio
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:

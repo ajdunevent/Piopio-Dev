@@ -45,6 +45,8 @@ pub struct ChatPage {
     /// Who is in a group chat, and leaving or rejoining it.
     people: gtk::MenuButton,
     is_room: Cell<bool>,
+    /// The call button (hidden in group chats).
+    call_button: RefCell<Option<gtk::Button>>,
     /// Who we are here: our JID, or room@service/nick in a group chat.
     me: RefCell<String>,
     messages: gtk::ListBox,
@@ -92,6 +94,11 @@ impl ChatPage {
             .menu_model(&menu)
             .build();
         header.pack_end(&more);
+        let call = gtk::Button::builder()
+            .icon_name("call-start-symbolic")
+            .tooltip_text("Call")
+            .build();
+        header.pack_end(&call);
         header.pack_end(&lock);
         header.pack_end(&people);
 
@@ -189,6 +196,7 @@ impl ChatPage {
             people,
             is_room: Cell::new(false),
             me: RefCell::new(me),
+            call_button: RefCell::default(),
             messages,
             scroller,
             entry: entry.clone(),
@@ -273,6 +281,18 @@ impl ChatPage {
         });
 
         this.install_actions();
+        let weak = Rc::downgrade(&this);
+        call.connect_clicked(move |b| {
+            if let Some(this) = weak.upgrade() {
+                b.set_sensitive(false);
+                let b = b.clone();
+                glib::spawn_future_local(async move {
+                    this.start_call().await;
+                    b.set_sensitive(true);
+                });
+            }
+        });
+        this.call_button.replace(Some(call));
 
         // Load older messages when scrolled to the top.
         let weak = Rc::downgrade(&this);
@@ -305,6 +325,9 @@ impl ChatPage {
                 this.page.set_title(&name);
                 if kind == "room" {
                     this.is_room.set(true);
+                    if let Some(b) = this.call_button.borrow().as_ref() {
+                        b.set_visible(false);
+                    }
                     // The lock still shows whether the room is encrypted,
                     // but there is no per-person dialog behind it.
                     this.lock.set_sensitive(false);
@@ -541,6 +564,38 @@ impl ChatPage {
                 *state.borrow_mut() = now;
             }
         });
+    }
+
+    /// Calls the peer: through the account that owns this conversation.
+    async fn start_call(self: &Rc<Self>) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let path = self.proxy.inner().path().to_string();
+        let account = path
+            .rsplit_once("/conversation/")
+            .map(|(a, _)| a.to_owned())
+            .unwrap_or_default();
+        let Some(info) = window
+            .accounts
+            .borrow()
+            .iter()
+            .find(|a| a.path.as_str() == account)
+            .cloned()
+        else {
+            return;
+        };
+        let proxy = info.proxy.clone();
+        let peer = self.proxy.clone();
+        let started = run(async move {
+            let jid = peer.peer().await?;
+            proxy.start_call(&jid, false).await
+        })
+        .await;
+        match started {
+            Ok(path) => crate::calls::open(&window, path).await,
+            Err(e) => window.toast(&format!("Couldn’t call: {}", client::explain(&e))),
+        }
     }
 
     /// Pin, mute and delete, for the conversation menu.

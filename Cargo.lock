@@ -2326,6 +2326,7 @@ dependencies = [
  "async-channel",
  "futures-util",
  "libadwaita",
+ "piopio-call",
  "piopio-dbus",
  "tokio",
  "zbus 5.13.2",
