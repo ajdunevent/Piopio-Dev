@@ -49,6 +49,8 @@ row.unread .title { font-weight: bold; }
   padding-left: 6px; margin-bottom: 2px; opacity: 0.85;
 }
 .reactions { margin: 0 6px; }
+.attachment-picture { border-radius: 8px; }
+.attachment { min-width: 200px; }
 button.reaction { padding: 0 8px; min-height: 24px; border-radius: 999px; font-size: smaller; }
 .fingerprint { font-family: monospace; }
 "#;

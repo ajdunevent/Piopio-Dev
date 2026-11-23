@@ -138,6 +138,13 @@ impl ChatPage {
             .margin_top(6)
             .margin_bottom(6)
             .build();
+        let attach = gtk::Button::builder()
+            .icon_name("mail-attachment-symbolic")
+            .tooltip_text("Share a File")
+            .css_classes(["flat", "circular"])
+            .valign(gtk::Align::Center)
+            .build();
+        row.append(&attach);
         row.append(&entry);
         row.append(&send);
         let composer = gtk::Box::builder()
@@ -195,6 +202,13 @@ impl ChatPage {
             move |_| do_send()
         });
         send.connect_clicked(move |_| do_send());
+
+        let weak = Rc::downgrade(&this);
+        attach.connect_clicked(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.pick_file();
+            }
+        });
 
         let weak = Rc::downgrade(&this);
         mode_cancel.connect_clicked(move |_| {
@@ -612,17 +626,25 @@ impl ChatPage {
         } else {
             (text(m, "body"), false)
         };
-        let body = gtk::Label::builder()
-            .label(body_text)
-            .wrap(true)
-            .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .selectable(!dimmed)
-            .xalign(0.0)
-            .build();
-        if dimmed {
-            body.add_css_class("undecryptable");
+        let file_state = text(m, "file-state");
+        let has_file = !file_state.is_empty() && !retracted;
+        if has_file {
+            bubble.append(&self.attachment(m));
         }
-        bubble.append(&body);
+        // A file's message is only its link: don't show that too.
+        if !(has_file && (body_text.is_empty() || body_text == text(m, "file-url"))) {
+            let body = gtk::Label::builder()
+                .label(body_text)
+                .wrap(true)
+                .wrap_mode(gtk::pango::WrapMode::WordChar)
+                .selectable(!dimmed)
+                .xalign(0.0)
+                .build();
+            if dimmed {
+                body.add_css_class("undecryptable");
+            }
+            bubble.append(&body);
+        }
 
         let meta = gtk::Box::builder()
             .spacing(4)
@@ -683,6 +705,146 @@ impl ChatPage {
             self.attach_menu(&bubble, &id, outgoing);
         }
         column.upcast()
+    }
+
+    /// A shared file: the picture's thumbnail, or a row with the file's
+    /// name and a button to download or open it.
+    fn attachment(self: &Rc<Self>, m: &Dict) -> gtk::Widget {
+        let id = text(m, "id");
+        let state = text(m, "file-state");
+        let path = text(m, "file-path");
+        let thumbnail = text(m, "file-thumbnail");
+        let name = text(m, "file-name");
+        if !thumbnail.is_empty() {
+            let picture = gtk::Picture::for_filename(&thumbnail);
+            picture.set_can_shrink(true);
+            picture.set_content_fit(gtk::ContentFit::Cover);
+            picture.set_size_request(240, 180);
+            picture.add_css_class("attachment-picture");
+            picture.set_tooltip_text(Some(&name));
+            let click = gtk::GestureClick::new();
+            let p = path.clone();
+            click.connect_released(move |_, _, _, _| open_file(&p));
+            picture.add_controller(click);
+            return picture.upcast();
+        }
+        let row = gtk::Box::builder()
+            .spacing(8)
+            .css_classes(["attachment"])
+            .build();
+        let icon = if text(m, "file-mime").starts_with("image/") {
+            "image-x-generic-symbolic"
+        } else {
+            "text-x-generic-symbolic"
+        };
+        row.append(&gtk::Image::builder().icon_name(icon).pixel_size(24).build());
+        let size = m
+            .get("file-size")
+            .and_then(|v| i64::try_from(v).ok())
+            .filter(|s| *s >= 0)
+            .map(|s| glib::format_size(s as u64).to_string())
+            .unwrap_or_default();
+        let labels = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .hexpand(true)
+            .build();
+        labels.append(
+            &gtk::Label::builder()
+                .label(&name)
+                .xalign(0.0)
+                .ellipsize(gtk::pango::EllipsizeMode::Middle)
+                .max_width_chars(28)
+                .build(),
+        );
+        let detail = match state.as_str() {
+            "uploading" => "Uploading…".to_owned(),
+            "downloading" => "Downloading…".to_owned(),
+            "failed" => "Couldn’t transfer the file".to_owned(),
+            _ => size,
+        };
+        if !detail.is_empty() {
+            labels.append(
+                &gtk::Label::builder()
+                    .label(detail)
+                    .xalign(0.0)
+                    .css_classes(["caption", "dim-label"])
+                    .build(),
+            );
+        }
+        row.append(&labels);
+        match state.as_str() {
+            "uploading" | "downloading" => row.append(&crate::spinner()),
+            "done" if !path.is_empty() => {
+                let open = gtk::Button::builder()
+                    .icon_name("document-open-symbolic")
+                    .tooltip_text("Open")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat", "circular"])
+                    .build();
+                open.connect_clicked(move |_| open_file(&path));
+                row.append(&open);
+            }
+            "remote" | "failed" => {
+                let get = gtk::Button::builder()
+                    .icon_name("folder-download-symbolic")
+                    .tooltip_text("Download")
+                    .valign(gtk::Align::Center)
+                    .css_classes(["flat", "circular"])
+                    .build();
+                let (proxy, window) = (self.proxy.clone(), self.window.clone());
+                get.connect_clicked(move |_| {
+                    let (proxy, id, window) = (proxy.clone(), id.clone(), window.clone());
+                    glib::spawn_future_local(async move {
+                        let result = run(async move { proxy.download_file(&id).await }).await;
+                        if let (Err(e), Some(w)) = (result, window.upgrade()) {
+                            w.toast(&client::explain(&e));
+                        }
+                    });
+                });
+                row.append(&get);
+            }
+            _ => {}
+        }
+        row.upcast()
+    }
+
+    /// Asks for a file and shares it.
+    fn pick_file(self: &Rc<Self>) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let dialog = gtk::FileDialog::builder()
+            .title("Share a File")
+            .modal(true)
+            .build();
+        let (proxy, weak) = (self.proxy.clone(), self.window.clone());
+        dialog.open(
+            Some(&window.window),
+            gtk::gio::Cancellable::NONE,
+            move |result| {
+                let Ok(file) = result else { return };
+                let Some(path) = file.path() else { return };
+                let name = file
+                    .basename()
+                    .map(|b| b.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".into());
+                let (proxy, weak) = (proxy.clone(), weak.clone());
+                glib::spawn_future_local(async move {
+                    let sent = run(async move {
+                        let f = std::fs::File::open(&path).map_err(|e| {
+                            zbus::Error::Failure(format!("can't read the file: {e}"))
+                        })?;
+                        proxy
+                            .send_file(zbus::zvariant::Fd::from(&f), &name, HashMap::new())
+                            .await
+                    })
+                    .await;
+                    if let (Err(e), Some(w)) = (sent, weak.upgrade()) {
+                        w.toast(&format!("Not sent: {}", client::explain(&e)));
+                    }
+                });
+            },
+        );
     }
 
     /// Reaction chips under a message; tapping one adds or removes ours.
@@ -998,6 +1160,19 @@ impl ChatPage {
         });
         self.scroll_to_end();
     }
+}
+
+/// Opens a downloaded file with the app the user chose for its type.
+fn open_file(path: &str) {
+    if path.is_empty() {
+        return;
+    }
+    let file = gtk::gio::File::for_path(path);
+    gtk::FileLauncher::new(Some(&file)).launch(
+        None::<&gtk::Window>,
+        gtk::gio::Cancellable::NONE,
+        |_| {},
+    );
 }
 
 fn text(dict: &Dict, key: &str) -> String {
