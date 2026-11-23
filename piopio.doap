@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Description of Piopio for xmpp.org's software list (XEP-0453).
+     A XEP is listed under <implements> only once it works and has passed
+     interop testing; planned support lives in the project spec, not here. -->
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns="http://usefulinc.com/ns/doap#"
+         xmlns:foaf="http://xmlns.com/foaf/0.1/"
+         xmlns:xmpp="https://linkmauve.fr/ns/xmpp-doap#"
+         xmlns:schema="https://schema.org/">
+  <Project>
+    <name>Piopio</name>
+    <shortdesc xml:lang="en">An XMPP client for GNOME with OMEMO on by default</shortdesc>
+    <description xml:lang="en">A headless daemon does all the XMPP work and a GTK 4 and libadwaita UI displays it, so the client stays small in the background.</description>
+    <homepage rdf:resource="https://github.com/ajdunevent/Piopio-Dev"/>
+    <license rdf:resource="https://spdx.org/licenses/GPL-3.0-or-later.html"/>
+    <programming-language>Rust</programming-language>
+    <os>Linux</os>
+    <platform>GNOME</platform>
+    <category rdf:resource="https://linkmauve.fr/ns/xmpp-doap#category-client"/>
+    <maintainer>
+      <foaf:Person>
+        <foaf:name>AJ Dunevent</foaf:name>
+      </foaf:Person>
+    </maintainer>
+    <repository>
+      <GitRepository>
+        <browse rdf:resource="https://github.com/ajdunevent/Piopio-Dev"/>
+        <location rdf:resource="https://github.com/ajdunevent/Piopio-Dev.git"/>
+      </GitRepository>
+    </repository>
+  </Project>
+</rdf:RDF>

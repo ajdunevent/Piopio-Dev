@@ -1,0 +1,16 @@
+[package]
+name = "piopio-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+piopio-dbus = { version = "0.1.0", path = "../piopio-dbus" }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "process", "time"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zbus = { version = "5.13.2", default-features = false, features = ["tokio"] }

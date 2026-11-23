@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>net.dunevent.Piopio</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Piopio</name>
+  <summary>Chat over XMPP with end-to-end encryption</summary>
+  <developer id="net.dunevent">
+    <name>AJ Dunevent</name>
+  </developer>
+  <description>
+    <p>
+      Piopio is an XMPP client that talks to Conversations, Dino and Converse.js
+      users without anyone noticing a difference. OMEMO encryption is on from the
+      first message.
+    </p>
+    <p>
+      A small background service does all the network work, so messages and
+      notifications keep arriving with no window open and almost no memory used.
+    </p>
+    <p>
+      The name comes from the North Island piopio, a New Zealand thrush whose
+      quick, whistling call gave it its Māori name.
+    </p>
+  </description>
+  <launchable type="desktop-id">net.dunevent.Piopio.desktop</launchable>
+  <url type="homepage">https://github.com/ajdunevent/Piopio-Dev</url>
+  <url type="vcs-browser">https://github.com/ajdunevent/Piopio-Dev</url>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-info">mild</content_attribute>
+  </content_rating>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <releases>
+    <release version="0.1.0" date="2026-11-22" type="development">
+      <description>
+        <p>Project skeleton: the background service starts on the session bus, and the window opens.</p>
+      </description>
+    </release>
+  </releases>
+</component>

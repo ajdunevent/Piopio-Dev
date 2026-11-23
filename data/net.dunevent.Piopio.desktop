@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Piopio
+Comment=Chat over XMPP with end-to-end encryption
+Exec=piopio %u
+Icon=net.dunevent.Piopio
+Terminal=false
+Categories=Network;InstantMessaging;Chat;GTK;
+Keywords=xmpp;jabber;chat;messaging;omemo;
+MimeType=x-scheme-handler/xmpp;
+StartupNotify=true
+X-Purism-FormFactor=Workstation;Mobile;

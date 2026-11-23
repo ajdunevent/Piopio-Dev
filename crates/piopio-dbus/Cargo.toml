@@ -1,0 +1,11 @@
+[package]
+name = "piopio-dbus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+zbus = { version = "5.13.2", default-features = false, features = ["tokio"] }

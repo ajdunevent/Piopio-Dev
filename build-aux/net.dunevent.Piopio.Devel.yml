@@ -1,0 +1,47 @@
+# Development build of Piopio for the GNOME 51 runtime.
+#
+# Cargo downloads crates during the build (--share=network), which is fine for
+# local and CI builds. A Flathub manifest will instead vendor the crates with
+# flatpak-cargo-generator.
+#
+#   flatpak-builder --user --install --force-clean build-dir build-aux/net.dunevent.Piopio.Devel.yml
+#   flatpak run net.dunevent.Piopio
+id: net.dunevent.Piopio
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: piopio
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/piopio/cargo
+modules:
+  - name: piopio
+    buildsystem: simple
+    build-options:
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --release --locked --workspace
+      - install -Dm755 target/release/piopio -t /app/bin
+      - install -Dm755 target/release/piopio-daemon -t /app/bin
+      - install -Dm644 data/net.dunevent.Piopio.desktop -t /app/share/applications
+      - install -Dm644 data/net.dunevent.Piopio.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 data/net.dunevent.Piopio.Daemon.service -t /app/share/dbus-1/services
+      - install -Dm644 data/icons/hicolor/scalable/apps/net.dunevent.Piopio.svg -t /app/share/icons/hicolor/scalable/apps
+      - install -Dm644 data/icons/hicolor/symbolic/apps/net.dunevent.Piopio-symbolic.svg -t /app/share/icons/hicolor/symbolic/apps
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - build-dir
+          - .flatpak-builder
