@@ -60,7 +60,7 @@ async fn encrypted_picture_and_room_file() {
     .await;
     assert_eq!(text(&mine, "file-state"), "done");
     assert!(text(&mine, "body").starts_with("aesgcm://"), "{mine:?}");
-    assert_eq!(text(&mine, "encryption"), "omemo");
+    assert_eq!(text(&mine, "encryption"), "omemo2");
     assert!(!text(&mine, "file-thumbnail").is_empty());
 
     let bob_chat = wait_for(20, "Bob's conversation", || async {

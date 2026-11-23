@@ -131,6 +131,29 @@ const SCHEMA: &[&str] = &[
         PRIMARY KEY (account_id, jid)
     );
     "#,
+    // Version 7: OMEMO 2, beside legacy OMEMO
+    r#"
+    CREATE TABLE omemo2_own (
+        account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        state      TEXT NOT NULL
+    );
+    CREATE TABLE omemo2_devices (
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        jid        TEXT NOT NULL,
+        device_id  INTEGER NOT NULL,
+        active     INTEGER NOT NULL DEFAULT 1,
+        trust      TEXT NOT NULL DEFAULT 'undecided',
+        identity   TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (account_id, jid, device_id)
+    );
+    CREATE TABLE omemo2_sessions (
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        jid        TEXT NOT NULL,
+        device_id  INTEGER NOT NULL,
+        state      TEXT NOT NULL,
+        PRIMARY KEY (account_id, jid, device_id)
+    );
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -880,9 +903,65 @@ impl Store {
     }
 
     pub async fn omemo_own(&self, account: i64) -> anyhow::Result<Option<String>> {
+        self.omemo_own_v(1, account).await
+    }
+
+    pub async fn set_omemo_own(&self, account: i64, state: String) -> anyhow::Result<()> {
+        self.set_omemo_own_v(1, account, state).await
+    }
+
+    pub async fn devices(&self, account: i64, jid: String) -> anyhow::Result<Vec<DeviceRow>> {
+        self.devices_v(1, account, jid).await
+    }
+
+    pub async fn set_device_list(
+        &self,
+        account: i64,
+        jid: String,
+        ids: Vec<u32>,
+    ) -> anyhow::Result<()> {
+        self.set_device_list_v(1, account, jid, ids).await
+    }
+
+    pub async fn set_device(
+        &self,
+        account: i64,
+        jid: String,
+        device_id: u32,
+        identity: String,
+        trust: String,
+    ) -> anyhow::Result<()> {
+        self.set_device_v(1, account, jid, device_id, identity, trust)
+            .await
+    }
+
+    pub async fn omemo_session(
+        &self,
+        account: i64,
+        jid: String,
+        device_id: u32,
+    ) -> anyhow::Result<Option<String>> {
+        self.omemo_session_v(1, account, jid, device_id).await
+    }
+
+    pub async fn set_omemo_session(
+        &self,
+        account: i64,
+        jid: String,
+        device_id: u32,
+        state: String,
+    ) -> anyhow::Result<()> {
+        self.set_omemo_session_v(1, account, jid, device_id, state)
+            .await
+    }
+
+    // The same for either OMEMO version: 1 is legacy OMEMO, 2 is OMEMO 2.
+
+    pub async fn omemo_own_v(&self, version: u8, account: i64) -> anyhow::Result<Option<String>> {
+        let table = omemo_table(version, "own");
         self.with(move |db| {
             db.query_row(
-                "SELECT state FROM omemo_own WHERE account_id = ?1",
+                &format!("SELECT state FROM {table} WHERE account_id = ?1"),
                 [account],
                 |r| r.get(0),
             )
@@ -891,11 +970,19 @@ impl Store {
         .await
     }
 
-    pub async fn set_omemo_own(&self, account: i64, state: String) -> anyhow::Result<()> {
+    pub async fn set_omemo_own_v(
+        &self,
+        version: u8,
+        account: i64,
+        state: String,
+    ) -> anyhow::Result<()> {
+        let table = omemo_table(version, "own");
         self.with(move |db| {
             db.execute(
-                "INSERT INTO omemo_own (account_id, state) VALUES (?1, ?2)
-                 ON CONFLICT (account_id) DO UPDATE SET state = excluded.state",
+                &format!(
+                    "INSERT INTO {table} (account_id, state) VALUES (?1, ?2)
+                     ON CONFLICT (account_id) DO UPDATE SET state = excluded.state"
+                ),
                 params![account, state],
             )
             .map(drop)
@@ -903,12 +990,18 @@ impl Store {
         .await
     }
 
-    pub async fn devices(&self, account: i64, jid: String) -> anyhow::Result<Vec<DeviceRow>> {
+    pub async fn devices_v(
+        &self,
+        version: u8,
+        account: i64,
+        jid: String,
+    ) -> anyhow::Result<Vec<DeviceRow>> {
+        let table = omemo_table(version, "devices");
         self.with(move |db| {
-            let mut q = db.prepare(
-                "SELECT jid, device_id, active, trust, identity FROM omemo_devices
-                 WHERE account_id = ?1 AND jid = ?2 ORDER BY device_id",
-            )?;
+            let mut q = db.prepare(&format!(
+                "SELECT jid, device_id, active, trust, identity FROM {table}
+                 WHERE account_id = ?1 AND jid = ?2 ORDER BY device_id"
+            ))?;
             q.query_map(params![account, jid], |r| {
                 Ok(DeviceRow {
                     jid: r.get(0)?,
@@ -925,22 +1018,26 @@ impl Store {
 
     /// Records a published device list: listed devices become active (new
     /// ones are added), devices no longer listed become inactive.
-    pub async fn set_device_list(
+    pub async fn set_device_list_v(
         &self,
+        version: u8,
         account: i64,
         jid: String,
         ids: Vec<u32>,
     ) -> anyhow::Result<()> {
+        let table = omemo_table(version, "devices");
         self.with(move |db| {
             let tx = db.transaction()?;
             tx.execute(
-                "UPDATE omemo_devices SET active = 0 WHERE account_id = ?1 AND jid = ?2",
+                &format!("UPDATE {table} SET active = 0 WHERE account_id = ?1 AND jid = ?2"),
                 params![account, jid],
             )?;
             for id in ids {
                 tx.execute(
-                    "INSERT INTO omemo_devices (account_id, jid, device_id) VALUES (?1, ?2, ?3)
-                     ON CONFLICT (account_id, jid, device_id) DO UPDATE SET active = 1",
+                    &format!(
+                        "INSERT INTO {table} (account_id, jid, device_id) VALUES (?1, ?2, ?3)
+                         ON CONFLICT (account_id, jid, device_id) DO UPDATE SET active = 1"
+                    ),
                     params![account, jid, id],
                 )?;
             }
@@ -950,20 +1047,24 @@ impl Store {
     }
 
     /// Updates one device's identity key and trust (inserting it if needed).
-    pub async fn set_device(
+    pub async fn set_device_v(
         &self,
+        version: u8,
         account: i64,
         jid: String,
         device_id: u32,
         identity: String,
         trust: String,
     ) -> anyhow::Result<()> {
+        let table = omemo_table(version, "devices");
         self.with(move |db| {
             db.execute(
-                "INSERT INTO omemo_devices (account_id, jid, device_id, active, trust, identity)
-                 VALUES (?1, ?2, ?3, 0, ?5, ?4)
-                 ON CONFLICT (account_id, jid, device_id) DO UPDATE SET
-                   identity = excluded.identity, trust = excluded.trust",
+                &format!(
+                    "INSERT INTO {table} (account_id, jid, device_id, active, trust, identity)
+                     VALUES (?1, ?2, ?3, 0, ?5, ?4)
+                     ON CONFLICT (account_id, jid, device_id) DO UPDATE SET
+                       identity = excluded.identity, trust = excluded.trust"
+                ),
                 params![account, jid, device_id, identity, trust],
             )
             .map(drop)
@@ -971,15 +1072,19 @@ impl Store {
         .await
     }
 
-    pub async fn omemo_session(
+    pub async fn omemo_session_v(
         &self,
+        version: u8,
         account: i64,
         jid: String,
         device_id: u32,
     ) -> anyhow::Result<Option<String>> {
+        let table = omemo_table(version, "sessions");
         self.with(move |db| {
             db.query_row(
-                "SELECT state FROM omemo_sessions WHERE account_id = ?1 AND jid = ?2 AND device_id = ?3",
+                &format!(
+                    "SELECT state FROM {table} WHERE account_id = ?1 AND jid = ?2 AND device_id = ?3"
+                ),
                 params![account, jid, device_id],
                 |r| r.get(0),
             )
@@ -988,22 +1093,35 @@ impl Store {
         .await
     }
 
-    pub async fn set_omemo_session(
+    pub async fn set_omemo_session_v(
         &self,
+        version: u8,
         account: i64,
         jid: String,
         device_id: u32,
         state: String,
     ) -> anyhow::Result<()> {
+        let table = omemo_table(version, "sessions");
         self.with(move |db| {
             db.execute(
-                "INSERT INTO omemo_sessions (account_id, jid, device_id, state) VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (account_id, jid, device_id) DO UPDATE SET state = excluded.state",
+                &format!(
+                    "INSERT INTO {table} (account_id, jid, device_id, state) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (account_id, jid, device_id) DO UPDATE SET state = excluded.state"
+                ),
                 params![account, jid, device_id, state],
             )
             .map(drop)
         })
         .await
+    }
+}
+
+/// The table for OMEMO data of `version` (1: legacy, 2: OMEMO 2).
+fn omemo_table(version: u8, what: &str) -> String {
+    if version == 2 {
+        format!("omemo2_{what}")
+    } else {
+        format!("omemo_{what}")
     }
 }
 

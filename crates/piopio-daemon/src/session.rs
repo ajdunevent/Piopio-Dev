@@ -269,6 +269,8 @@ async fn run(
                         let _ = tx.send(Err(IqError::NoReply));
                     }
                     *shared.bound.lock().await = Some(bound_jid);
+                    // A new session: we are in no room until we join again.
+                    shared.rooms.new_session().await;
                     set_state(&iface, State::Connected, Some(String::new())).await;
                     shared.online.send_replace(true);
                     tokio::spawn(came_online(shared.clone(), features));

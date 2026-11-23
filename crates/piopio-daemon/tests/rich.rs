@@ -61,7 +61,7 @@ async fn reply_correct_react_retract() {
     })
     .await;
     assert_eq!(text(&bobs_copy, "body"), "Hello");
-    assert_eq!(text(&bobs_copy, "encryption"), "omemo");
+    assert_eq!(text(&bobs_copy, "encryption"), "omemo2");
     let bobs_id = text(&bobs_copy, "id");
 
     // Bob replies; Alice sees the reply without the quote, and what it answers.

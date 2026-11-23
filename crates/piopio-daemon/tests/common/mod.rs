@@ -31,6 +31,22 @@ impl TestDaemon {
 
     /// Starts a daemon on `data` (to test what survives a restart).
     pub async fn start_with(data: std::sync::Arc<tempfile::TempDir>) -> Option<Self> {
+        Self::start_with_env(data, &[]).await
+    }
+
+    /// Starts a daemon that only speaks legacy OMEMO, like most clients today.
+    pub async fn start_legacy_only() -> Option<Self> {
+        Self::start_with_env(
+            std::sync::Arc::new(tempfile::tempdir().unwrap()),
+            &[("PIOPIO_TEST_LEGACY_OMEMO_ONLY", "1")],
+        )
+        .await
+    }
+
+    pub async fn start_with_env(
+        data: std::sync::Arc<tempfile::TempDir>,
+        env: &[(&str, &str)],
+    ) -> Option<Self> {
         let Ok(mut bus) = Command::new("dbus-daemon")
             .args(["--session", "--nofork", "--print-address=1"])
             .stdout(Stdio::piped())
@@ -52,6 +68,7 @@ impl TestDaemon {
             .env("PIOPIO_DATA_DIR", data.path())
             .env("PIOPIO_DB_KEY", "test-key")
             .env("PIOPIO_ALLOW_PLAINTEXT", "1")
+            .envs(env.iter().copied())
             .stdout(Stdio::null())
             .kill_on_drop(true)
             .spawn()

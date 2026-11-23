@@ -598,7 +598,7 @@ impl ChatPage {
         glib::spawn_future_local(async move {
             while let Ok(encryption) = changes.recv().await {
                 let Some(this) = weak.upgrade() else { break };
-                let encrypted = encryption == "omemo";
+                let encrypted = encryption == "omemo" || encryption == "omemo2";
                 this.lock.set_icon_name(if encrypted {
                     "channel-secure-symbolic"
                 } else {

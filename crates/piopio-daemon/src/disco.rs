@@ -20,6 +20,7 @@ pub const FEATURES: &[&str] = &[
     "urn:xmpp:sid:0",
     "urn:xmpp:carbons:2",
     "eu.siacs.conversations.axolotl.devicelist+notify",
+    "urn:xmpp:omemo:2:devices+notify",
     "urn:xmpp:message-correct:0",
     "urn:xmpp:message-retract:0",
     "urn:xmpp:message-retract:1",

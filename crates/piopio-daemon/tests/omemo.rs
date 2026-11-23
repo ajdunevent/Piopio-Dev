@@ -27,7 +27,7 @@ async fn encryption_and_trust() {
         .conversation(erin_account.start_chat("frank@localhost").await.unwrap())
         .await;
     wait_for(20, "the conversation to use OMEMO", || async {
-        (erin_chat.encryption().await.unwrap() == "omemo").then_some(())
+        (erin_chat.encryption().await.unwrap() == "omemo2").then_some(())
     })
     .await;
     let sent = erin_chat
@@ -50,17 +50,17 @@ async fn encryption_and_trust() {
     })
     .await;
     assert_eq!(text(&got, "body"), "Only for you");
-    assert_eq!(text(&got, "encryption"), "omemo");
+    assert_eq!(text(&got, "encryption"), "omemo2");
     let mine = erin_chat.get_messages("", 10).await.unwrap();
     let mine = message(&mine, &sent).unwrap();
-    assert_eq!(text(mine, "encryption"), "omemo");
+    assert_eq!(text(mine, "encryption"), "omemo2");
 
     // Frank answers over the session Erin started.
     frank_chat.send("Understood", HashMap::new()).await.unwrap();
     wait_for(20, "Erin to read the answer", || async {
         let m = erin_chat.get_messages("", 10).await.unwrap();
         m.iter()
-            .any(|m| text(m, "body") == "Understood" && text(m, "encryption") == "omemo")
+            .any(|m| text(m, "body") == "Understood" && text(m, "encryption") == "omemo2")
             .then_some(())
     })
     .await;
@@ -165,4 +165,45 @@ async fn removed_account_retires_its_device() {
             .map(|_| ())
     })
     .await;
+}
+
+/// All or nothing per conversation: with someone whose client only speaks
+/// legacy OMEMO, both sides use legacy OMEMO; between Piopios, OMEMO 2.
+#[tokio::test]
+async fn legacy_with_legacy_only_clients() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    let carol = TestDaemon::start().await.unwrap();
+    let dave = TestDaemon::start_legacy_only().await.unwrap();
+    let (carol_path, carol_account) = carol.add_local("carol").await;
+    let (dave_path, dave_account) = dave.add_local("dave").await;
+    carol.wait_published(&carol_path).await;
+    dave.wait_published(&dave_path).await;
+
+    let carol_chat = carol
+        .conversation(carol_account.start_chat("dave@localhost").await.unwrap())
+        .await;
+    carol_chat.send("Old school", HashMap::new()).await.unwrap();
+    let dave_chat = wait_for(20, "Dave's conversation", || async {
+        dave.conversation_with(&dave_path, "carol@localhost").await
+    })
+    .await;
+    let dave_chat = dave.conversation(dave_chat).await;
+    let got = wait_for(20, "Dave to read it", || async {
+        let m = dave_chat.get_messages("", 50).await.unwrap();
+        m.into_iter().find(|m| text(m, "body") == "Old school")
+    })
+    .await;
+    assert_eq!(text(&got, "encryption"), "omemo");
+    let _ = dave_account;
+    dave_chat.send("Still works", HashMap::new()).await.unwrap();
+    let back = wait_for(20, "Carol to read the answer", || async {
+        let m = carol_chat.get_messages("", 50).await.unwrap();
+        m.into_iter().find(|m| text(m, "body") == "Still works")
+    })
+    .await;
+    assert_eq!(text(&back, "encryption"), "omemo");
+    assert_eq!(carol_chat.encryption().await.unwrap(), "omemo");
 }

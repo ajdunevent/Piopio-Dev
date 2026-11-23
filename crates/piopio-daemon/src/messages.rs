@@ -420,6 +420,64 @@ async fn handle(
         peer.to_string()
     };
 
+    // OMEMO 2: open the envelope first, so what it carries (body, replies,
+    // corrections) is handled like the same elements in the clear.
+    let mut v2_label: Option<&'static str> = None;
+    if let Some(i) = message
+        .payloads
+        .iter()
+        .position(|p| p.is("encrypted", crate::omemo2::NS))
+    {
+        let encrypted = message.payloads.remove(i);
+        let origin = message
+            .payloads
+            .iter()
+            .find(|p| p.is("origin-id", "urn:xmpp:sid:0"))
+            .and_then(|o| o.attr("id"))
+            .map(str::to_owned)
+            .or_else(|| message.id.as_ref().map(|i| i.0.clone()));
+        if encrypted.has_child("payload", crate::omemo2::NS)
+            && let Some(origin) = &origin
+            && let Ok((conversation, _)) = session.conversations.get(session, &peer).await
+            && session
+                .store
+                .has_message(conversation, origin.clone(), outgoing)
+                .await
+                .unwrap_or(false)
+        {
+            return;
+        }
+        let sender = if outgoing {
+            session.jid.clone()
+        } else {
+            peer.clone()
+        };
+        match crate::omemo2::decrypt(session, &sender, &encrypted).await {
+            crate::omemo2::Opened::Content(content, trusted) => {
+                message.bodies.clear();
+                for c in content {
+                    if c.name() == "body" {
+                        message.bodies.insert(Lang::default(), c.text());
+                    } else {
+                        message.payloads.push(c);
+                    }
+                }
+                v2_label = Some(if trusted { "omemo2" } else { "omemo-untrusted" });
+            }
+            crate::omemo2::Opened::Other(crate::omemo::Decrypted::KeyTransport) => return,
+            crate::omemo2::Opened::Other(crate::omemo::Decrypted::Failed(why)) => {
+                if !encrypted.has_child("payload", crate::omemo2::NS) {
+                    return;
+                }
+                tracing::info!(%peer, "an OMEMO 2 message could not be decrypted: {why}");
+                message.bodies.clear();
+                message.bodies.insert(Lang::default(), String::new());
+                v2_label = Some("omemo-failed");
+            }
+            crate::omemo2::Opened::Other(crate::omemo::Decrypted::Text { .. }) => return,
+        }
+    }
+
     // Retractions and reactions change an earlier message and are not
     // messages themselves (their bodies are only fallbacks).
     if let Some(target) = rich::retraction(&message) {
@@ -473,7 +531,7 @@ async fn handle(
     };
 
     let (body, encryption) = match encrypted {
-        None => (plain_body.unwrap_or_default(), "none"),
+        None => (plain_body.unwrap_or_default(), v2_label.unwrap_or("none")),
         Some(encrypted) => {
             // Already stored (our own message, or one seen live and again in
             // the archive): decrypting again would only fail.
@@ -989,6 +1047,39 @@ async fn deliver(
         } else {
             crate::omemo::Outgoing::Plain
         }
+    } else if wanted && crate::omemo::use_v2(session, peer).await {
+        // OMEMO 2: the body and what refers to other messages go inside
+        // the encrypted envelope.
+        let mut content = vec![
+            tokio_xmpp::minidom::Element::builder("body", "jabber:client")
+                .append(body)
+                .build(),
+        ];
+        content.extend(extra);
+        let envelope = crate::omemo2::envelope(&session.jid, content);
+        let outcome = crate::omemo2::encrypt(session, peer, &envelope).await;
+        return match outcome {
+            crate::omemo::Outgoing::Encrypted(encrypted) => {
+                message
+                    .bodies
+                    .insert(Lang::default(), crate::omemo2::FALLBACK_BODY.to_owned());
+                message.payloads.push(encrypted);
+                message.payloads.push(
+                    ExplicitMessageEncryption {
+                        namespace: crate::omemo2::NS.to_owned(),
+                        name: Some("OMEMO".to_owned()),
+                    }
+                    .into(),
+                );
+                message.payloads.push(rich::store_hint());
+                (wait_sent(session, message).await, "omemo2")
+            }
+            crate::omemo::Outgoing::Failed(why) => {
+                tracing::warn!(%peer, "not sending: {why}");
+                (state::FAILED, "none")
+            }
+            crate::omemo::Outgoing::Plain => (state::FAILED, "none"),
+        };
     } else {
         crate::omemo::encrypt(session, peer, wanted, body).await
     };

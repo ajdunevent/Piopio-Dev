@@ -74,7 +74,11 @@ pub struct OmemoState {
     /// Set while the account is being removed: don't re-announce ourselves.
     retiring: AtomicBool,
     /// Held while sessions are used, so each is used by one message at a time.
-    sessions: Mutex<()>,
+    pub(crate) sessions: Mutex<()>,
+    /// Our OMEMO 2 keys (same identity and device id as above).
+    pub(crate) own2: Mutex<Option<omemo::v2::OwnKeys>>,
+    /// When we last fetched each JID's OMEMO 2 device list.
+    pub(crate) fetched2: Mutex<HashMap<String, Instant>>,
 }
 
 /// What became of an incoming `<encrypted/>`.
@@ -97,11 +101,18 @@ pub enum Outgoing {
     Failed(String),
 }
 
-fn hex(bytes: &[u8]) -> String {
+impl OmemoState {
+    /// Whether the account is being removed (don't re-announce devices).
+    pub fn retiring(&self) -> bool {
+        self.retiring.load(Ordering::SeqCst)
+    }
+}
+
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn unhex(s: &str) -> Option<[u8; 32]> {
+pub(crate) fn unhex(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 {
         return None;
     }
@@ -114,7 +125,7 @@ fn unhex(s: &str) -> Option<[u8; 32]> {
 
 /// Runs `f` on our own keys, loading or generating them first; saves them
 /// afterwards if `f` changed them.
-async fn with_own<R>(
+pub(crate) async fn with_own<R>(
     shared: &Shared,
     f: impl FnOnce(&mut omemo::OwnKeys) -> R,
 ) -> anyhow::Result<R> {
@@ -289,6 +300,7 @@ pub async fn online(shared: &Shared) {
         .await
         .insert(jid.to_string(), Instant::now());
     device_list_received(shared, &jid, ids).await;
+    crate::omemo2::online(shared).await;
     if ok {
         shared.omemo.published.store(true, Ordering::SeqCst);
         let emitter = SignalEmitter::new(&shared.bus, shared.path.clone()).expect("valid path");
@@ -316,6 +328,7 @@ pub async fn retire(shared: &Shared) {
         return;
     };
     shared.omemo.retiring.store(true, Ordering::SeqCst);
+    crate::omemo2::retire(shared).await;
     let jid = shared.jid.clone();
     if let Some(list) = fetch_item(shared, &jid, ns::LEGACY_OMEMO_DEVICELIST).await {
         let ids: Vec<u32> = device_ids(&list)
@@ -345,6 +358,9 @@ pub async fn event(shared: &Shared, from: Option<&Jid>, event: &Element) -> bool
     let Some(items) = event.get_child("items", ns::PUBSUB_EVENT) else {
         return false;
     };
+    if crate::omemo2::event(shared, from, items).await {
+        return true;
+    }
     if items.attr("node") != Some(ns::LEGACY_OMEMO_DEVICELIST) {
         return false;
     }
@@ -416,7 +432,7 @@ async fn device_list_received(shared: &Shared, jid: &BareJid, ids: Vec<u32>) {
     }
 }
 
-async fn devices_changed(shared: &Shared, jid: &BareJid) {
+pub(crate) async fn devices_changed(shared: &Shared, jid: &BareJid) {
     let emitter = SignalEmitter::new(&shared.bus, shared.path.clone()).expect("valid path");
     let _ = OmemoObject::devices_changed(&emitter, jid.as_str()).await;
     shared.conversations.encryption_changed(shared, jid).await;
@@ -425,22 +441,26 @@ async fn devices_changed(shared: &Shared, jid: &BareJid) {
 /// Makes sure we know `jid`'s devices: fetched once per login, and again
 /// once the list is old (notifications keep contacts' lists current).
 async fn ensure_devices(shared: &Shared, jid: &BareJid) {
+    crate::omemo2::ensure_devices(shared, jid).await;
     if let Some(when) = shared.omemo.fetched.lock().await.get(jid.as_str())
         && when.elapsed() < DEVICE_LIST_TTL
     {
+        tracing::debug!(account = %shared.jid, %jid, "device list is recent");
         return;
     }
+    tracing::debug!(account = %shared.jid, %jid, "fetching the device list");
     let ids = match fetch_item(shared, jid, ns::LEGACY_OMEMO_DEVICELIST).await {
         Some(list) => device_ids(&list),
         None => vec![],
     };
+    // Stored before it counts as fetched, so nobody reads an empty list.
+    device_list_received(shared, jid, ids).await;
     shared
         .omemo
         .fetched
         .lock()
         .await
         .insert(jid.to_string(), Instant::now());
-    device_list_received(shared, jid, ids).await;
 }
 
 /// Fetches `jid`'s device list in the background if ours is missing or old.
@@ -461,6 +481,11 @@ pub async fn conversation_encryption(shared: &Shared, peer: &str, wanted: bool) 
     // Group chats: encrypted when members-only and non-anonymous.
     if let Some(live) = shared.rooms.get(peer).await {
         return if live.private { "omemo" } else { "none" };
+    }
+    if let Ok(jid) = peer.parse::<BareJid>()
+        && crate::omemo2::prefers_v2(shared, &jid).await
+    {
+        return "omemo2";
     }
     let devices = shared
         .store
@@ -561,7 +586,14 @@ pub async fn encrypt(shared: &Shared, peer: &BareJid, wanted: bool, body: &str) 
 /// Whether `peer` has OMEMO devices (fetching their list if needed).
 pub async fn peer_uses_omemo(shared: &Shared, peer: &BareJid) -> bool {
     ensure_devices(shared, peer).await;
-    !active_devices(shared, peer).await.is_empty()
+    !active_devices(shared, peer).await.is_empty() || crate::omemo2::prefers_v2(shared, peer).await
+}
+
+/// Fetches `peer`'s device lists if old, then says whether to use OMEMO 2.
+pub async fn use_v2(shared: &Shared, peer: &BareJid) -> bool {
+    ensure_devices(shared, peer).await;
+    ensure_devices(shared, &shared.jid.clone()).await;
+    crate::omemo2::prefers_v2(shared, peer).await
 }
 
 /// Encrypts for a private group chat's members: every member must use
@@ -853,11 +885,41 @@ impl OmemoObject {
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         let own = own_device(&self.session).await.ok().map(|(id, _)| id);
-        Ok(devices
+        let mut out: Vec<HashMap<String, OwnedValue>> = devices
             .iter()
             .filter(|d| !(jid == self.session.jid.as_str() && Some(d.device_id) == own))
-            .map(device_dict)
-            .collect())
+            .map(|d| {
+                let mut m = device_dict(d);
+                m.insert("protocol".into(), OwnedValue::from(Str::from("omemo")));
+                m
+            })
+            .collect();
+        // Devices that only speak OMEMO 2 (the same device in both is
+        // listed once, with its legacy fingerprint).
+        for mut d in crate::omemo2::devices_for_bus(&self.session, jid).await {
+            if Some(d.device_id) == own && jid == self.session.jid.as_str() {
+                continue;
+            }
+            // Show the key in its Curve25519 form, as legacy OMEMO does, so
+            // a device has one fingerprint whichever protocol we know it by.
+            d.identity = unhex(&d.identity)
+                .and_then(|ed| omemo::xeddsa::montgomery_public(&ed))
+                .map(|k| hex(&k))
+                .unwrap_or_default();
+            let known_here = devices
+                .iter()
+                .any(|l| l.device_id == d.device_id && !l.identity.is_empty());
+            if known_here {
+                continue;
+            }
+            out.retain(|m| {
+                m.get("device-id").and_then(|v| u32::try_from(v).ok()) != Some(d.device_id)
+            });
+            let mut m = device_dict(&d);
+            m.insert("protocol".into(), OwnedValue::from(Str::from("omemo2")));
+            out.push(m);
+        }
+        Ok(out)
     }
 
     /// Sets a device's trust: verified, untrusted, blind or undecided.
@@ -884,19 +946,28 @@ impl OmemoObject {
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
             .into_iter()
-            .find(|d| d.device_id == device_id)
-            .ok_or_else(|| zbus::fdo::Error::InvalidArgs("unknown device".into()))?;
-        self.session
-            .store
-            .set_device(
-                self.session.account_id,
-                jid.to_owned(),
-                device_id,
-                device.identity,
-                trust.to_owned(),
-            )
+            .find(|d| d.device_id == device_id);
+        let in_v2 = crate::omemo2::devices_for_bus(&self.session, jid)
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            .iter()
+            .any(|d| d.device_id == device_id);
+        if device.is_none() && !in_v2 {
+            return Err(zbus::fdo::Error::InvalidArgs("unknown device".into()));
+        }
+        if let Some(device) = device {
+            self.session
+                .store
+                .set_device(
+                    self.session.account_id,
+                    jid.to_owned(),
+                    device_id,
+                    device.identity,
+                    trust.to_owned(),
+                )
+                .await
+                .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        }
+        crate::omemo2::set_trust(&self.session, jid, device_id, trust).await;
         devices_changed(&self.session, &bare).await;
         Ok(())
     }

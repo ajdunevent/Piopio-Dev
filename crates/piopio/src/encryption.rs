@@ -105,6 +105,7 @@ pub fn show(window: &Rc<Window>, conversation: ConversationProxy<'static>, own_j
         wanted.set_active(is_wanted);
         wanted.set_subtitle(match (is_wanted, encryption.as_str()) {
             (true, "omemo") => "Messages are end-to-end encrypted with OMEMO",
+            (true, "omemo2") => "Messages are end-to-end encrypted with OMEMO 2",
             (true, _) => "This contact’s apps don’t support OMEMO, so messages are not encrypted",
             (false, _) => "Messages are not encrypted",
         });
@@ -161,7 +162,11 @@ async fn fill(group: &adw::PreferencesGroup, omemo: &OmemoProxy<'static>, jid: &
             } else {
                 fingerprint_markup(&fingerprint)
             })
-            .subtitle(trust_text(&trust, active))
+            .subtitle(if text(&d, "protocol") == "omemo2" {
+                format!("{} · OMEMO 2 only", trust_text(&trust, active))
+            } else {
+                trust_text(&trust, active).to_owned()
+            })
             .css_classes(["fingerprint"])
             .build();
         let switch = gtk::Switch::builder()

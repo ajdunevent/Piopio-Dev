@@ -81,6 +81,16 @@ impl Rooms {
         self.live.lock().await.get(room).map(|l| l.nick.clone())
     }
 
+    /// A new XMPP session: nobody is in any room until joined again.
+    pub async fn new_session(&self) {
+        for live in self.live.lock().await.values_mut() {
+            live.occupants.clear();
+            if live.state == "joined" {
+                live.state = "joining".into();
+            }
+        }
+    }
+
     pub async fn is_room(&self, room: &str) -> bool {
         self.live.lock().await.contains_key(room)
     }
@@ -258,13 +268,6 @@ pub async fn leave(session: &Session, room: &BareJid) {
 
 /// After every login: learn the bookmarks and join the rooms to join.
 pub async fn online(session: &Session) {
-    // Nobody is in any room after a new login.
-    for live in session.rooms.live.lock().await.values_mut() {
-        live.occupants.clear();
-        if live.state == "joined" {
-            live.state = "joining".into();
-        }
-    }
     if let Some(items) = crate::pep::fetch_all(session, BOOKMARKS).await {
         for (id, conference) in items {
             bookmark_learned(session, &id, &conference).await;
@@ -285,7 +288,12 @@ pub async fn online(session: &Session) {
         let Ok(jid) = room.parse::<BareJid>() else {
             continue;
         };
-        if row.autojoin {
+        let joined = session
+            .rooms
+            .get(&room)
+            .await
+            .is_some_and(|l| l.state == "joined");
+        if row.autojoin && !joined {
             send_join(session, &jid, &row).await;
         }
     }

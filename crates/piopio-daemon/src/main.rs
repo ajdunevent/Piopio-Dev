@@ -16,6 +16,7 @@ mod login;
 mod messages;
 mod notify;
 mod omemo;
+mod omemo2;
 mod pep;
 mod rich;
 mod rooms;

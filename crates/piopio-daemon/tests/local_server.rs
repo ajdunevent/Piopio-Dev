@@ -118,7 +118,7 @@ async fn contacts_chat_receipts_and_markers() {
     })
     .await;
     assert_eq!(text(&received, "body"), "Hello Bob");
-    assert_eq!(text(&received, "encryption"), "omemo");
+    assert_eq!(text(&received, "encryption"), "omemo2");
     assert!(!bool::try_from(received.get("outgoing").unwrap()).unwrap());
     assert_eq!(bob_chat.unread().await.unwrap(), 1);
 
@@ -162,9 +162,9 @@ async fn contacts_chat_receipts_and_markers() {
     assert_eq!(text(&messages[0], "body"), "Hello Bob");
     assert_eq!(text(&messages[1], "body"), "Hi Alice");
     for m in messages {
-        assert_eq!(text(m, "encryption"), "omemo", "{m:?}");
+        assert_eq!(text(m, "encryption"), "omemo2", "{m:?}");
     }
-    assert_eq!(alice_chat.encryption().await.unwrap(), "omemo");
+    assert_eq!(alice_chat.encryption().await.unwrap(), "omemo2");
     assert_eq!(alice_chat.unread().await.unwrap(), 1);
 
     // Typing notifications: Bob sees Alice typing, and stop when she sends.
@@ -297,7 +297,7 @@ async fn carbons_archive_and_restart() {
         let m = chat.get_messages("", 10).await.unwrap();
         (m.len() == 3
             && m.iter().any(|m| {
-                text(m, "body") == "While you were away" && text(m, "encryption") == "omemo"
+                text(m, "body") == "While you were away" && text(m, "encryption") == "omemo2"
             }))
         .then_some(())
     })
