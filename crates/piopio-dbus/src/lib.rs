@@ -154,6 +154,13 @@ pub trait Conversation {
     fn peer(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn kind(&self) -> zbus::Result<String>;
+    /// Whether the peer is typing: composing, paused or "".
+    #[zbus(property)]
+    fn peer_state(&self) -> zbus::Result<String>;
+
+    /// Tells the peer whether we are typing: composing, paused or active.
+    fn set_chat_state(&self, state: &str) -> zbus::Result<()>;
+
     /// The peer's picture (a small PNG file), or "".
     #[zbus(property)]
     fn avatar(&self) -> zbus::Result<String>;

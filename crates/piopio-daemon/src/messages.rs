@@ -11,6 +11,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::parsers::carbons;
+use tokio_xmpp::parsers::chatstates::ChatState;
 use tokio_xmpp::parsers::delay::Delay;
 use tokio_xmpp::parsers::displayed_markers::{Displayed, Markable};
 use tokio_xmpp::parsers::eme::ExplicitMessageEncryption;
@@ -104,6 +105,8 @@ impl Conversations {
             session: session.clone(),
             row,
             title,
+            peer_state: String::new(),
+            our_state: String::new(),
         };
         session.bus.object_server().at(&path, object).await?;
         if is_room {
@@ -146,6 +149,20 @@ impl Conversations {
         if object.title != title {
             object.title = title;
             let _ = object.title_changed(iface.signal_emitter()).await;
+        }
+    }
+
+    /// The peer started or stopped typing.
+    pub async fn peer_typing(&self, shared: &Shared, jid: &BareJid, state: &str) {
+        let Some((_, path)) = self.by_peer.lock().await.get(jid.as_str()).cloned() else {
+            return;
+        };
+        if let Some(iface) = self.iface(shared, &path).await {
+            let mut object = iface.get_mut().await;
+            if object.peer_state != state {
+                object.peer_state = state.to_owned();
+                let _ = object.peer_state_changed(iface.signal_emitter()).await;
+            }
         }
     }
 
@@ -315,6 +332,22 @@ async fn handle(
     }
     if !matches!(message.type_, MessageType::Chat | MessageType::Normal) {
         return; // group chats and headlines come later
+    }
+
+    // Typing notifications (XEP-0085), only as they happen.
+    if let Ok(Some(chat_state)) = message.extract_payload::<ChatState>()
+        && source == Source::Live
+        && !outgoing
+    {
+        let state = match chat_state {
+            ChatState::Composing => "composing",
+            ChatState::Paused => "paused",
+            _ => "",
+        };
+        session
+            .conversations
+            .peer_typing(session, &peer, state)
+            .await;
     }
 
     // Receipts and markers about our own outgoing messages.
@@ -832,7 +865,8 @@ async fn deliver(
     if tracked {
         message = message
             .with_payload(receipts::Request)
-            .with_payload(Markable);
+            .with_payload(Markable)
+            .with_payload(ChatState::Active);
     }
     message.id = Some(Id(id.to_owned()));
     let used = match crate::omemo::encrypt(session, peer, wanted, body).await {
@@ -954,6 +988,10 @@ pub struct ConversationObject {
     session: Session,
     row: ConversationRow,
     title: String,
+    /// composing, paused or "" (XEP-0085).
+    peer_state: String,
+    /// The state we last told the peer.
+    our_state: String,
 }
 
 impl ConversationObject {
@@ -969,6 +1007,18 @@ impl ConversationObject {
     fn valid_peer(&self) -> zbus::fdo::Result<BareJid> {
         self.peer_jid()
             .ok_or_else(|| zbus::fdo::Error::Failed("this conversation has no valid peer".into()))
+    }
+
+    /// Whether the peer may see our presence (so may know we're typing
+    /// or have read their messages).
+    async fn shares_presence(&self) -> bool {
+        self.session
+            .store
+            .contacts(self.session.account_id)
+            .await
+            .ok()
+            .and_then(|cs| cs.into_iter().find(|c| c.jid == self.row.peer))
+            .is_some_and(|c| c.subscription == "from" || c.subscription == "both")
     }
 
     fn is_room(&self) -> bool {
@@ -1054,6 +1104,48 @@ impl ConversationObject {
     #[zbus(property)]
     fn kind(&self) -> String {
         self.row.kind.clone()
+    }
+
+    /// Whether the peer is typing: composing, paused or "".
+    #[zbus(property)]
+    fn peer_state(&self) -> String {
+        self.peer_state.clone()
+    }
+
+    /// Tells the peer whether we are typing: composing, paused or active.
+    /// Repeats are not sent again; group chats get nothing.
+    async fn set_chat_state(
+        &mut self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        state: &str,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let chat_state = match state {
+            "composing" => ChatState::Composing,
+            "paused" => ChatState::Paused,
+            "active" => ChatState::Active,
+            _ => {
+                return Err(zbus::fdo::Error::InvalidArgs(
+                    "composing, paused or active".into(),
+                ));
+            }
+        };
+        if self.is_room() || self.our_state == state || !self.session.is_online() {
+            return Ok(());
+        }
+        // Only tell contacts who share presence with us that we're typing.
+        if !self.shares_presence().await {
+            return Ok(());
+        }
+        self.our_state = state.to_owned();
+        let peer = self.valid_peer()?;
+        let mut message = Message::new_with_type(MessageType::Chat, Some(Jid::from(peer)))
+            .with_payload(chat_state);
+        message
+            .payloads
+            .push(tokio_xmpp::minidom::Element::builder("no-store", rich::HINTS).build());
+        self.session.send(message).await;
+        Ok(())
     }
 
     /// The peer's picture (a small PNG), or "".
@@ -1182,6 +1274,8 @@ impl ConversationObject {
         }
         let peer = self.valid_peer()?;
         self.check_joined().await?;
+        // Sending ends typing; the message itself says we're active.
+        self.our_state = "active".into();
         let reply_to = match options.get("reply-to") {
             Some(v) => {
                 let id = <&str>::try_from(v)
@@ -1572,15 +1666,7 @@ impl ConversationObject {
         let Some(peer) = self.peer_jid() else {
             return Ok(());
         };
-        let trusted = self
-            .session
-            .store
-            .contacts(self.session.account_id)
-            .await
-            .ok()
-            .and_then(|cs| cs.into_iter().find(|c| c.jid == self.row.peer))
-            .is_some_and(|c| c.subscription == "from" || c.subscription == "both");
-        if !trusted {
+        if !self.shares_presence().await {
             return Ok(());
         }
         let newest_incoming = self

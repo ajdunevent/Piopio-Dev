@@ -57,6 +57,10 @@ pub struct ChatPage {
     /// Rows and their messages by message id, to update them in place.
     rows: RefCell<HashMap<String, (gtk::ListBoxRow, Dict)>>,
     oldest: RefCell<String>,
+    /// Ends "typing" after a pause.
+    typing_timer: RefCell<Option<glib::SourceId>>,
+    /// The subtitle when the peer isn't typing.
+    subtitle: RefCell<String>,
     loading: Cell<bool>,
     at_start: Cell<bool>,
 }
@@ -183,6 +187,8 @@ impl ChatPage {
             mode: RefCell::default(),
             rows: RefCell::default(),
             oldest: RefCell::default(),
+            typing_timer: RefCell::default(),
+            subtitle: RefCell::default(),
             loading: Cell::new(false),
             at_start: Cell::new(false),
         });
@@ -190,6 +196,12 @@ impl ChatPage {
         entry.connect_changed({
             let send = send.clone();
             move |e| send.set_sensitive(!e.text().trim().is_empty())
+        });
+        let weak = Rc::downgrade(&this);
+        entry.connect_changed(move |e| {
+            if let Some(this) = weak.upgrade() {
+                this.typed(!e.text().is_empty());
+            }
         });
         let weak = Rc::downgrade(&this);
         let do_send = move || {
@@ -275,7 +287,9 @@ impl ChatPage {
             .await
             {
                 title.set_title(&name);
-                title.set_subtitle(if name == peer { "" } else { &peer });
+                let subtitle = if name == peer { "" } else { &peer };
+                title.set_subtitle(subtitle);
+                *this.subtitle.borrow_mut() = subtitle.to_owned();
                 this.page.set_title(&name);
                 if kind == "room" {
                     this.is_room.set(true);
@@ -284,6 +298,9 @@ impl ChatPage {
                 }
             }
             this.follow_encryption();
+            if !this.is_room.get() {
+                this.follow_typing();
+            }
             this.load_older().await;
             this.scroll_to_end();
             let proxy = this.proxy.clone();
@@ -468,6 +485,56 @@ impl ChatPage {
                     list.append(&row);
                 }
                 *state.borrow_mut() = now;
+            }
+        });
+    }
+
+    /// Tells the peer we're typing, and that we paused after 5 seconds.
+    fn typed(self: &Rc<Self>, has_text: bool) {
+        if self.is_room.get() {
+            return;
+        }
+        if let Some(timer) = self.typing_timer.borrow_mut().take() {
+            timer.remove();
+        }
+        self.chat_state(if has_text { "composing" } else { "active" });
+        if has_text {
+            let weak = Rc::downgrade(self);
+            let id = glib::timeout_add_seconds_local_once(5, move || {
+                if let Some(this) = weak.upgrade() {
+                    this.typing_timer.borrow_mut().take();
+                    this.chat_state("paused");
+                }
+            });
+            *self.typing_timer.borrow_mut() = Some(id);
+        }
+    }
+
+    fn chat_state(&self, state: &'static str) {
+        let proxy = self.proxy.clone();
+        glib::spawn_future_local(async move {
+            let _ = run(async move { proxy.set_chat_state(state).await }).await;
+        });
+    }
+
+    /// Shows "typing…" under the title while the peer types.
+    fn follow_typing(self: &Rc<Self>) {
+        let changes = {
+            let proxy = self.proxy.clone();
+            client::forward(move || async move {
+                let later = proxy.receive_peer_state_changed().await;
+                Some(later.filter_map(|c| async move { c.get().await.ok() }))
+            })
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(state) = changes.recv().await {
+                let Some(this) = weak.upgrade() else { break };
+                if state == "composing" {
+                    this.title.set_subtitle("typing…");
+                } else {
+                    this.title.set_subtitle(&this.subtitle.borrow());
+                }
             }
         });
     }

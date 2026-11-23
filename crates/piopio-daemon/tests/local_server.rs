@@ -166,6 +166,23 @@ async fn contacts_chat_receipts_and_markers() {
     }
     assert_eq!(alice_chat.encryption().await.unwrap(), "omemo");
     assert_eq!(alice_chat.unread().await.unwrap(), 1);
+
+    // Typing notifications: Bob sees Alice typing, and stop when she sends.
+    alice_chat.set_chat_state("composing").await.unwrap();
+    wait_for(20, "Bob to see Alice typing", || async {
+        (bob_chat.peer_state().await.unwrap() == "composing").then_some(())
+    })
+    .await;
+    alice_chat.send("Typed it", HashMap::new()).await.unwrap();
+    wait_for(20, "the typing to end", || async {
+        bob_chat
+            .peer_state()
+            .await
+            .unwrap()
+            .is_empty()
+            .then_some(())
+    })
+    .await;
 }
 
 /// A second device sees sent messages through Carbons, a new device gets
