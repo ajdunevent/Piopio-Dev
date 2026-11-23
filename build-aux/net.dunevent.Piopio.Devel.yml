@@ -21,6 +21,8 @@ finish-args:
   - --device=dri
   # Calls: the microphone and speakers.
   - --socket=pulseaudio
+  # Phones: ringing through Quiet and Silent for chosen conversations.
+  - --talk-name=org.sigxcpu.Feedback
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:

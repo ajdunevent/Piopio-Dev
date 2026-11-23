@@ -171,6 +171,17 @@ const SCHEMA: &[&str] = &[
         PRIMARY KEY (account_id, jid)
     );
     "#,
+    // Version 10: app settings, and each conversation's notification sound
+    // ("default", "silent" or "custom") and whether it may ring through
+    // Do Not Disturb and quiet modes.
+    r#"
+    CREATE TABLE settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    ALTER TABLE conversations ADD COLUMN notification_sound TEXT NOT NULL DEFAULT 'default';
+    ALTER TABLE conversations ADD COLUMN override_quiet INTEGER NOT NULL DEFAULT 0;
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -223,6 +234,8 @@ pub struct ConversationRow {
     /// "default" (the account's setting), "on" or "off".
     pub send_chat_states: String,
     pub send_receipts: String,
+    pub notification_sound: String,
+    pub override_quiet: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -322,6 +335,30 @@ impl Store {
         })
         .await?
         .map_err(Into::into)
+    }
+
+    // App settings
+
+    pub async fn setting(&self, key: &'static str) -> anyhow::Result<Option<String>> {
+        self.with(move |db| {
+            db.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn set_setting(&self, key: &'static str, value: String) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )
+            .map(drop)
+        })
+        .await
     }
 
     // Contacts' features
@@ -565,7 +602,8 @@ impl Store {
         self.with(move |db| {
             db.execute(
                 "UPDATE conversations SET pinned = ?2, muted = ?3, unread = ?4, last_activity = ?5,
-                 encryption_wanted = ?6, send_chat_states = ?7, send_receipts = ?8 WHERE id = ?1",
+                 encryption_wanted = ?6, send_chat_states = ?7, send_receipts = ?8,
+                 notification_sound = ?9, override_quiet = ?10 WHERE id = ?1",
                 params![
                     row.id,
                     row.pinned,
@@ -574,7 +612,9 @@ impl Store {
                     row.last_activity,
                     row.encryption_wanted,
                     row.send_chat_states,
-                    row.send_receipts
+                    row.send_receipts,
+                    row.notification_sound,
+                    row.override_quiet
                 ],
             )
             .map(drop)
@@ -1281,7 +1321,7 @@ fn rank(state: &str) -> u8 {
 }
 
 const CONVERSATION_COLUMNS: &str = "id, account_id, peer, kind, pinned, muted, unread, last_activity, encryption_wanted, \
-     send_chat_states, send_receipts";
+     send_chat_states, send_receipts, notification_sound, override_quiet";
 const MESSAGE_COLUMNS: &str = "id, origin_id, server_id, outgoing, sender, body, timestamp, state, \
      encryption, edited, retracted, reply_to, reply_to_sender, reply_preview";
 
@@ -1329,6 +1369,8 @@ fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         encryption_wanted: r.get(8)?,
         send_chat_states: r.get(9)?,
         send_receipts: r.get(10)?,
+        notification_sound: r.get(11)?,
+        override_quiet: r.get(12)?,
     })
 }
 

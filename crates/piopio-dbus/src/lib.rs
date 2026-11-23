@@ -59,6 +59,25 @@ pub trait Daemon {
     /// Disconnect everything and exit.
     fn quit(&self) -> zbus::Result<()>;
 
+    /// Start at login (always false while RunInBackground is).
+    #[zbus(property)]
+    fn start_at_login(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_start_at_login(&self, on: bool) -> zbus::Result<()>;
+
+    /// Keep running, with notifications, after the window closes.
+    #[zbus(property)]
+    fn run_in_background(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_run_in_background(&self, on: bool) -> zbus::Result<()>;
+
+    /// "default", "silent" or "custom".
+    #[zbus(property)]
+    fn notification_sound(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn set_notification_sound(&self, value: &str) -> zbus::Result<()>;
+    fn set_custom_sound(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
+
     /// Version of this interface.
     #[zbus(property)]
     fn api_version(&self) -> zbus::Result<u32>;
@@ -276,6 +295,19 @@ pub trait Conversation {
     /// What the peer's apps support; empty when unknown.
     #[zbus(property)]
     fn peer_features(&self) -> zbus::Result<Vec<String>>;
+
+    /// "default" (the app's), "silent" or "custom".
+    #[zbus(property)]
+    fn notification_sound(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn set_notification_sound(&self, value: &str) -> zbus::Result<()>;
+    fn set_custom_sound(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
+
+    /// Ring through Do Not Disturb and quiet modes.
+    #[zbus(property)]
+    fn override_quiet(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_override_quiet(&self, on: bool) -> zbus::Result<()>;
 
     /// Whether the peer is on our blocklist.
     #[zbus(property)]

@@ -1,25 +1,27 @@
 //! Running in the background (Background portal).
 //!
-//! Inside Flatpak, the daemon asks once to run in the background and to start
-//! when the user logs in. The portal then writes an autostart entry that
-//! launches `piopio-daemon` directly, with no window. Outside Flatpak there is
-//! no portal to ask, and nothing to do.
+//! Inside Flatpak, the daemon asks to run in the background and, when Start
+//! at Login is on, to start when the user logs in. The portal then writes
+//! (or removes) an autostart entry that launches `piopio-daemon` directly,
+//! with no window. Outside Flatpak there is no portal to ask; starting at
+//! login is up to how Piopio was installed.
 
 use std::collections::HashMap;
 
 use futures_util::StreamExt;
 use zbus::zvariant::{OwnedValue, Value};
 
-pub async fn request(bus: zbus::Connection) {
+/// Asks the portal again with the current Start at Login setting.
+pub async fn apply(bus: zbus::Connection, autostart: bool) {
     if !std::path::Path::new("/.flatpak-info").exists() {
         return;
     }
-    if let Err(e) = ask(&bus).await {
+    if let Err(e) = ask(&bus, autostart).await {
         tracing::info!("background permission not granted: {e}");
     }
 }
 
-async fn ask(bus: &zbus::Connection) -> anyhow::Result<()> {
+async fn ask(bus: &zbus::Connection, autostart: bool) -> anyhow::Result<()> {
     let token = format!("piopio{}", std::process::id());
     let sender = bus
         .unique_name()
@@ -43,7 +45,7 @@ async fn ask(bus: &zbus::Connection) -> anyhow::Result<()> {
         "reason",
         Value::from("Piopio receives messages and shows notifications while its window is closed."),
     );
-    options.insert("autostart", Value::from(true));
+    options.insert("autostart", Value::from(autostart));
     options.insert("commandline", Value::from(vec!["piopio-daemon"]));
     options.insert("dbus-activatable", Value::from(false));
     bus.call_method(

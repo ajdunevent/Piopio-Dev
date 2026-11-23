@@ -38,6 +38,11 @@ pub async fn watch_ui(bus: &zbus::Connection) -> zbus::Result<()> {
     Ok(())
 }
 
+/// Follows whether a window is open.
+pub fn subscribe() -> Option<watch::Receiver<bool>> {
+    UI_PRESENT.get().cloned()
+}
+
 /// True while a Piopio window is open.
 pub fn ui_present() -> bool {
     UI_PRESENT.get().is_some_and(|rx| *rx.borrow())

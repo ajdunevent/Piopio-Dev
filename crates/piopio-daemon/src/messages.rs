@@ -1036,6 +1036,10 @@ async fn set_unread(session: &Session, peer: &BareJid, unread: u32) {
             let _ = session.store.update_conversation(object.row.clone()).await;
         }
     }
+    // Read on another device: its notification here is old news.
+    if unread == 0 {
+        crate::notify::withdraw(session, &path).await;
+    }
 }
 
 /// Fetches what arrived while we were offline from our own archive.
@@ -1328,8 +1332,22 @@ pub struct ConversationObject {
 
 impl ConversationObject {
     /// The Muted setting, for code outside the D-Bus interface.
-    pub fn muted_setting(&self) -> &str {
-        &self.row.muted
+    /// How this conversation's notifications behave.
+    pub fn notification_style(&self) -> crate::notify::Style {
+        crate::notify::Style {
+            muted: self.row.muted == "always",
+            sound: self.row.notification_sound.clone(),
+            override_quiet: self.row.override_quiet,
+            conversation_id: self.row.id,
+        }
+    }
+
+    fn object_path(&self) -> Option<OwnedObjectPath> {
+        OwnedObjectPath::try_from(format!(
+            "{}/conversation/{}",
+            self.session.path, self.row.id
+        ))
+        .ok()
     }
 
     /// Whether this conversation tells the peer we're typing.
@@ -1611,6 +1629,56 @@ impl ConversationObject {
     #[zbus(property)]
     async fn blocked(&self) -> bool {
         self.session.blocked.contains(&self.row.peer).await
+    }
+
+    /// "default" (the app's sound), "silent" or "custom" (set with
+    /// SetNotificationSound). Writable with "default" or "silent".
+    #[zbus(property)]
+    fn notification_sound(&self) -> String {
+        self.row.notification_sound.clone()
+    }
+
+    #[zbus(property)]
+    async fn set_notification_sound(&mut self, value: String) -> zbus::fdo::Result<()> {
+        if !matches!(value.as_str(), "default" | "silent") {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "default or silent; a custom sound is set with SetNotificationSound".into(),
+            ));
+        }
+        self.row.notification_sound = value;
+        self.save().await;
+        Ok(())
+    }
+
+    /// Plays this sound file (read from `file`, at most 2 MiB) for this
+    /// conversation's notifications.
+    async fn set_custom_sound(
+        &mut self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        file: zbus::zvariant::OwnedFd,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        crate::settings::save_sound(self.row.id.to_string(), file.into())
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{e:#}")))?;
+        self.row.notification_sound = "custom".into();
+        self.save().await;
+        let _ = self.notification_sound_changed(&emitter).await;
+        Ok(())
+    }
+
+    /// Whether notifications ring through Do Not Disturb (GNOME) and the
+    /// Quiet and Silent profiles (Phosh). Writable.
+    #[zbus(property)]
+    fn override_quiet(&self) -> bool {
+        self.row.override_quiet
+    }
+
+    #[zbus(property)]
+    async fn set_override_quiet(&mut self, on: bool) {
+        self.row.override_quiet = on;
+        self.save().await;
     }
 
     /// never, mentions or always.
@@ -2109,6 +2177,9 @@ impl ConversationObject {
             self.row.unread = 0;
             self.unread_changed(&emitter).await?;
             self.save().await;
+        }
+        if let Some(path) = self.object_path() {
+            crate::notify::withdraw(&self.session, &path).await;
         }
         let Some(peer) = self.peer_jid() else {
             return Ok(());

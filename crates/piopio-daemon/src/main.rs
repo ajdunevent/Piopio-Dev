@@ -26,6 +26,7 @@ mod rich;
 mod rooms;
 mod roster;
 mod session;
+mod settings;
 mod store;
 
 use std::sync::Arc;
@@ -51,17 +52,22 @@ async fn main() -> anyhow::Result<()> {
     let store = store::Store::open(&dir, &key)?;
     tracing::debug!(dir = %dir.display(), "database open");
 
+    let settings = settings::load(store.clone()).await;
     let (quit_tx, mut quit_rx) = watch::channel(false);
     let accounts = Arc::new(Mutex::new(daemon::Accounts::new(store)));
 
     let connection = zbus::connection::Builder::session()?
-        .serve_at(ROOT_PATH, daemon::Daemon::new(accounts.clone(), quit_tx))?
+        .serve_at(
+            ROOT_PATH,
+            daemon::Daemon::new(accounts.clone(), quit_tx.clone()),
+        )?
         .serve_at(ROOT_PATH, zbus::fdo::ObjectManager)?
         .build()
         .await
         .context("could not connect to the session bus")?;
 
     activity::watch_ui(&connection).await?;
+    let quit_tx_for_window = quit_tx;
     accounts.lock().await.load(&connection).await?;
     // Claim the name last, so activated callers find the accounts already exported.
     connection
@@ -75,7 +81,22 @@ async fn main() -> anyhow::Result<()> {
         "{DAEMON_BUS_NAME} is running"
     );
 
-    tokio::spawn(background::request(connection.clone()));
+    tokio::spawn(background::apply(
+        connection.clone(),
+        settings.start_at_login(),
+    ));
+    // Without Run in Background, closing the window ends the daemon too.
+    if let Some(mut window) = activity::subscribe() {
+        let (settings, quit) = (settings.clone(), quit_tx_for_window);
+        tokio::spawn(async move {
+            while window.changed().await.is_ok() {
+                if !*window.borrow() && !settings.run_in_background() {
+                    tracing::info!("window closed and not running in the background");
+                    let _ = quit.send(true);
+                }
+            }
+        });
+    }
 
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
