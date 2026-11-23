@@ -23,6 +23,7 @@ struct Entry {
     proxy: ConversationProxy<'static>,
     row: adw::ActionRow,
     badge: gtk::Label,
+    avatar: adw::Avatar,
     last_activity: i64,
     pinned: bool,
 }
@@ -423,11 +424,12 @@ impl Window {
                 let last = proxy.last_activity().await?;
                 let pinned = proxy.pinned().await?;
                 let newest = proxy.get_messages("", 1).await?.into_iter().next();
-                Ok::<_, zbus::Error>((proxy, title, unread, last, pinned, newest))
+                let picture = proxy.avatar().await.unwrap_or_default();
+                Ok::<_, zbus::Error>((proxy, title, unread, last, pinned, newest, picture))
             })
             .await
         };
-        let Ok((proxy, title, unread, last, pinned, newest)) = loaded else {
+        let Ok((proxy, title, unread, last, pinned, newest, picture)) = loaded else {
             return;
         };
         if self.entries.borrow().contains_key(&key) {
@@ -438,6 +440,7 @@ impl Window {
             .valign(gtk::Align::Center)
             .build();
         let avatar = adw::Avatar::new(36, Some(&title), true);
+        set_avatar_image(&avatar, &picture);
         let row = adw::ActionRow::builder()
             .title(glib::markup_escape_text(&title).as_str())
             .subtitle_lines(1)
@@ -459,6 +462,7 @@ impl Window {
                 proxy: proxy.clone(),
                 row: row.clone(),
                 badge,
+                avatar,
                 last_activity: last,
                 pinned,
             },
@@ -476,7 +480,11 @@ impl Window {
                 let unread = proxy.receive_unread_changed().await;
                 let title = proxy.receive_title_changed().await;
                 let last = proxy.receive_last_activity_changed().await;
+                let picture = proxy.receive_avatar_changed().await;
                 Some(futures_util::stream::select_all([
+                    picture
+                        .filter_map(|c| async move { c.get().await.ok().map(RowEvent::Avatar) })
+                        .boxed(),
                     added
                         .filter_map(|s| async move {
                             s.args()
@@ -526,7 +534,11 @@ impl Window {
                 }
                 set_unread(&entry.badge, &entry.row, n);
             }
-            RowEvent::Title(t) => entry.row.set_title(&glib::markup_escape_text(&t)),
+            RowEvent::Title(t) => {
+                entry.row.set_title(&glib::markup_escape_text(&t));
+                entry.avatar.set_text(Some(&t));
+            }
+            RowEvent::Avatar(path) => set_avatar_image(&entry.avatar, &path),
             RowEvent::Activity(t) => {
                 entry.last_activity = t;
                 store_sort_keys(&entry.row, t, entry.pinned);
@@ -599,6 +611,15 @@ enum RowEvent {
     Unread(u32),
     Title(String),
     Activity(i64),
+    Avatar(String),
+}
+
+/// Shows a picture file in an avatar (or the initials when there's none).
+pub fn set_avatar_image(avatar: &adw::Avatar, path: &str) {
+    let texture = (!path.is_empty())
+        .then(|| gtk::gdk::Texture::from_filename(path).ok())
+        .flatten();
+    avatar.set_custom_image(texture.as_ref());
 }
 
 fn text(dict: &Dict, key: &str) -> String {

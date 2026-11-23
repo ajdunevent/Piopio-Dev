@@ -156,3 +156,34 @@ async fn encrypted_picture_and_room_file() {
         b"bring binoculars"
     );
 }
+
+/// Setting our picture; someone who opens a chat with us sees it.
+#[tokio::test]
+async fn avatars() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    let carol = TestDaemon::start().await.unwrap();
+    let dave = TestDaemon::start().await.unwrap();
+    let (_, carol_account) = carol.add_local("carol").await;
+    let (dave_path, dave_account) = dave.add_local("dave").await;
+    carol_account
+        .set_avatar(zbus::zvariant::Fd::from(&picture()))
+        .await
+        .unwrap();
+    let own = carol_account.avatar().await.unwrap();
+    let image = image::open(&own).unwrap();
+    assert!(image.width() <= 192 && image.height() <= 192);
+
+    let chat = dave
+        .conversation(dave_account.start_chat("carol@localhost").await.unwrap())
+        .await;
+    let seen = wait_for(20, "Carol's picture", || async {
+        let p = chat.avatar().await.unwrap();
+        (!p.is_empty()).then_some(p)
+    })
+    .await;
+    assert_eq!(std::fs::read(seen).unwrap(), std::fs::read(own).unwrap());
+    let _ = dave_path;
+}

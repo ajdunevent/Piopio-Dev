@@ -149,6 +149,17 @@ impl Conversations {
         }
     }
 
+    /// Re-announces a conversation's Avatar.
+    pub async fn avatar_changed(&self, shared: &Shared, jid: &str) {
+        let Some((_, path)) = self.by_peer.lock().await.get(jid).cloned() else {
+            return;
+        };
+        if let Some(iface) = self.iface(shared, &path).await {
+            let object = iface.get().await;
+            let _ = object.avatar_changed(iface.signal_emitter()).await;
+        }
+    }
+
     /// Re-announces a conversation's Encryption (its peer's devices changed).
     pub async fn encryption_changed(&self, shared: &Shared, jid: &BareJid) {
         let Some((_, path)) = self.by_peer.lock().await.get(jid.as_str()).cloned() else {
@@ -203,6 +214,11 @@ pub async fn incoming(session: &Session, mut message: Message) {
         }
         if let Some(items) = event.get_child("items", ns::PUBSUB_EVENT)
             && crate::rooms::bookmark_event(session, message.from.as_ref(), items).await
+        {
+            return;
+        }
+        if let Some(items) = event.get_child("items", ns::PUBSUB_EVENT)
+            && crate::avatars::event(session, message.from.as_ref(), items).await
         {
             return;
         }
@@ -1040,14 +1056,15 @@ impl ConversationObject {
         self.row.kind.clone()
     }
 
+    /// The peer's picture (a small PNG), or "".
     #[zbus(property)]
-    fn title(&self) -> String {
-        self.title.clone()
+    async fn avatar(&self) -> String {
+        crate::avatars::path_of(&self.session, &self.row.peer).await
     }
 
     #[zbus(property)]
-    fn avatar(&self) -> String {
-        String::new()
+    fn title(&self) -> String {
+        self.title.clone()
     }
 
     #[zbus(property)]

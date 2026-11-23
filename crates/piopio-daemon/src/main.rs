@@ -6,6 +6,7 @@
 mod access;
 mod account;
 mod activity;
+mod avatars;
 mod background;
 mod connect;
 mod daemon;

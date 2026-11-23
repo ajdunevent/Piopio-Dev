@@ -121,6 +121,16 @@ const SCHEMA: &[&str] = &[
         state      TEXT NOT NULL
     );
     "#,
+    // Version 6: avatars
+    r#"
+    CREATE TABLE avatars (
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        jid        TEXT NOT NULL,
+        hash       TEXT NOT NULL,
+        path       TEXT NOT NULL,
+        PRIMARY KEY (account_id, jid)
+    );
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -729,6 +739,41 @@ impl Store {
             row.reactions = reactions_of(db, row.id)?;
                 row.attachment = attachment_of(db, row.id)?;
             Ok(Some(row))
+        })
+        .await
+    }
+
+    /// A JID's avatar: (hash, path); empty strings once removed.
+    pub async fn avatar(
+        &self,
+        account: i64,
+        jid: String,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        self.with(move |db| {
+            db.query_row(
+                "SELECT hash, path FROM avatars WHERE account_id = ?1 AND jid = ?2",
+                params![account, jid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn set_avatar(
+        &self,
+        account: i64,
+        jid: String,
+        hash: String,
+        path: String,
+    ) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO avatars (account_id, jid, hash, path) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (account_id, jid) DO UPDATE SET hash = excluded.hash, path = excluded.path",
+                params![account, jid, hash, path],
+            )
+            .map(drop)
         })
         .await
     }

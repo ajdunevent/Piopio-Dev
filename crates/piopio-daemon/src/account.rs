@@ -112,12 +112,6 @@ impl AccountObject {
         String::new()
     }
 
-    /// A cache handle for Files.GetAvatar; empty until avatars arrive.
-    #[zbus(property)]
-    fn avatar(&self) -> String {
-        String::new()
-    }
-
     #[zbus(property)]
     fn api_version(&self) -> u32 {
         ACCOUNT_API_VERSION
@@ -141,8 +135,40 @@ impl AccountObject {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
         // Learn whether the peer uses OMEMO, so Encryption is right before
         // the first message.
+        crate::avatars::refresh(&self.session, peer.clone());
         crate::omemo::refresh(&self.session, peer);
         Ok(path)
+    }
+
+    /// Sets the account's picture from an image file (read from the file
+    /// descriptor); contacts see it. An empty file removes it.
+    async fn set_avatar(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        file: zbus::zvariant::OwnedFd,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let fd: std::os::fd::OwnedFd = file.into();
+        let data = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+            use std::io::Read;
+            let mut data = Vec::new();
+            std::fs::File::from(fd)
+                .take(20 * 1024 * 1024)
+                .read_to_end(&mut data)?;
+            Ok(data)
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        crate::avatars::set_own(&self.session, data)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{e:#}")))
+    }
+
+    /// The account's own picture (a small PNG), or "".
+    #[zbus(property)]
+    async fn avatar(&self) -> String {
+        crate::avatars::path_of(&self.session, self.session.jid.as_str()).await
     }
 
     /// Joins a group chat and bookmarks it. Returns the conversation's path

@@ -111,6 +111,13 @@ pub trait Account {
 
     /// Changes the password on the server, then uses it.
     fn change_password(&self, new: &str) -> zbus::Result<()>;
+
+    /// Sets the account's picture from an image file; empty removes it.
+    fn set_avatar(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
+
+    /// The account's own picture (a small PNG file), or "".
+    #[zbus(property)]
+    fn avatar(&self) -> zbus::Result<String>;
 }
 
 /// A dictionary as passed over D-Bus (`a{sv}`).
@@ -147,6 +154,10 @@ pub trait Conversation {
     fn peer(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn kind(&self) -> zbus::Result<String>;
+    /// The peer's picture (a small PNG file), or "".
+    #[zbus(property)]
+    fn avatar(&self) -> zbus::Result<String>;
+
     #[zbus(property)]
     fn title(&self) -> zbus::Result<String>;
     #[zbus(property)]

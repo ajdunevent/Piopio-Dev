@@ -484,6 +484,62 @@ pub fn accounts(window: &Rc<Window>) {
         row.add_suffix(&remove);
         group.add(&row);
 
+        // The account's picture; click to change it.
+        let picture = adw::Avatar::new(40, Some(&account.jid), true);
+        let choose = gtk::Button::builder()
+            .child(&picture)
+            .tooltip_text("Change Picture")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat", "circular"])
+            .build();
+        row.add_prefix(&choose);
+        {
+            let (proxy, picture) = (account.proxy.clone(), picture.clone());
+            glib::spawn_future_local(async move {
+                let path = run(async move { proxy.avatar().await.unwrap_or_default() }).await;
+                crate::window::set_avatar_image(&picture, &path);
+            });
+        }
+        {
+            let (proxy, picture, w) = (account.proxy.clone(), picture.clone(), window.clone());
+            choose.connect_clicked(move |_| {
+                let filter = gtk::FileFilter::new();
+                filter.add_pixbuf_formats();
+                filter.set_name(Some("Pictures"));
+                let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&filter);
+                let chooser = gtk::FileDialog::builder()
+                    .title("Choose a Picture")
+                    .filters(&filters)
+                    .build();
+                let (proxy, picture, w2) = (proxy.clone(), picture.clone(), w.clone());
+                chooser.open(
+                    Some(&w.window),
+                    gtk::gio::Cancellable::NONE,
+                    move |result| {
+                        let Some(path) = result.ok().and_then(|f| f.path()) else {
+                            return;
+                        };
+                        let (proxy, picture, w) = (proxy.clone(), picture.clone(), w2.clone());
+                        glib::spawn_future_local(async move {
+                            let set = run(async move {
+                                let f = std::fs::File::open(&path).map_err(|e| {
+                                    zbus::Error::Failure(format!("can't read the picture: {e}"))
+                                })?;
+                                proxy.set_avatar(zbus::zvariant::Fd::from(&f)).await?;
+                                proxy.avatar().await
+                            })
+                            .await;
+                            match set {
+                                Ok(path) => crate::window::set_avatar_image(&picture, &path),
+                                Err(e) => w.toast(&client::explain(&e)),
+                            }
+                        });
+                    },
+                );
+            });
+        }
+
         let proxy = account.proxy.clone();
         let (row2, enabled2) = (row.clone(), enabled.clone());
         glib::spawn_future_local(async move {

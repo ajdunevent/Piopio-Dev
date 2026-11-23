@@ -214,6 +214,11 @@ async fn emit_contact(shared: &Shared, c: &ContactRow) {
         .await;
 }
 
+/// Tells the UI about changes to one contact.
+pub async fn emit_changes(shared: &Shared, jid: &str, changes: HashMap<&str, Value<'_>>) {
+    let _ = RosterObject::contact_changed(&emitter(shared), jid, changes).await;
+}
+
 async fn emit_removed(shared: &Shared, jid: &str) {
     let changes = HashMap::from([("removed", Value::from(true))]);
     let _ = RosterObject::contact_changed(&emitter(shared), jid, changes).await;
@@ -287,6 +292,12 @@ impl RosterObject {
                 .unwrap_or_else(|| ("offline".into(), String::new()));
             let pending = bare.as_ref().is_some_and(|b| requests.contains(b));
             let mut map = HashMap::new();
+            map.insert(
+                "avatar".into(),
+                OwnedValue::from(zbus::zvariant::Str::from(
+                    crate::avatars::path_of(shared, &c.jid).await,
+                )),
+            );
             map.insert(
                 "jid".into(),
                 OwnedValue::from(zbus::zvariant::Str::from(c.jid)),
