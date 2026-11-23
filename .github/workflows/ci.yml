@@ -15,7 +15,7 @@ env:
 
 jobs:
   # The daemon and the shared crate need no GTK, so they build and test on the
-  # plain runner. The D-Bus test starts the real daemon on a private session bus.
+  # plain runner. The D-Bus tests start the real daemon on private session buses.
   daemon:
     name: Daemon (fmt, clippy, test)
     runs-on: ubuntu-latest
@@ -28,7 +28,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y dbus
       - run: cargo fmt --all --check
       - run: cargo clippy --locked -p piopio-daemon -p piopio-dbus --all-targets -- -D warnings
-      - run: dbus-run-session -- cargo test --locked -p piopio-daemon -p piopio-dbus
+      - run: cargo test --locked -p piopio-daemon -p piopio-dbus
 
   # The UI targets GTK 4.24 and libadwaita 1.10, which only the GNOME 51
   # runtime has, so it is checked by building the real Flatpak.
@@ -83,4 +83,6 @@ jobs:
       - if: steps.secrets.outputs.present == 'true'
         run: sudo apt-get update && sudo apt-get install -y dbus
       - if: steps.secrets.outputs.present == 'true'
-        run: dbus-run-session -- cargo test --locked -p piopio-daemon -- --ignored
+        env:
+          PIOPIO_LOG: info,piopio_daemon=debug
+        run: cargo test --locked -p piopio-daemon --test server -- --ignored

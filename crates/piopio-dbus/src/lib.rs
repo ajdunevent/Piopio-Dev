@@ -20,6 +20,12 @@ pub const DAEMON_INTERFACE: &str = "net.dunevent.Piopio.Daemon";
 /// Version of the Daemon interface implemented by this build.
 pub const DAEMON_API_VERSION: u32 = 1;
 
+/// Version of the Account interface implemented by this build.
+pub const ACCOUNT_API_VERSION: u32 = 1;
+
+/// Accounts live at `ACCOUNT_PATH_PREFIX/<id>`.
+pub const ACCOUNT_PATH_PREFIX: &str = "/net/dunevent/Piopio/account";
+
 /// Client side of `net.dunevent.Piopio.Daemon`.
 #[zbus::proxy(
     interface = "net.dunevent.Piopio.Daemon",
@@ -27,10 +33,45 @@ pub const DAEMON_API_VERSION: u32 = 1;
     default_path = "/net/dunevent/Piopio"
 )]
 pub trait Daemon {
+    /// Add an account and start connecting. Returns the account's object path.
+    fn add_account(
+        &self,
+        jid: &str,
+        password: &str,
+        options: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+
+    /// Disconnect an account and forget it.
+    fn remove_account(&self, account: &zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
+
     /// Disconnect everything and exit.
     fn quit(&self) -> zbus::Result<()>;
 
     /// Version of this interface.
+    #[zbus(property)]
+    fn api_version(&self) -> zbus::Result<u32>;
+}
+
+/// Client side of `net.dunevent.Piopio.Account`, one object per account.
+#[zbus::proxy(
+    interface = "net.dunevent.Piopio.Account",
+    default_service = "net.dunevent.Piopio.Daemon"
+)]
+pub trait Account {
+    #[zbus(property)]
+    fn jid(&self) -> zbus::Result<String>;
+
+    #[zbus(property)]
+    fn enabled(&self) -> zbus::Result<bool>;
+
+    /// One of disconnected, connecting, connected or error.
+    #[zbus(property)]
+    fn state(&self) -> zbus::Result<String>;
+
+    /// Why the account is in the error state, or why the last attempt failed.
+    #[zbus(property)]
+    fn error(&self) -> zbus::Result<String>;
+
     #[zbus(property)]
     fn api_version(&self) -> zbus::Result<u32>;
 }

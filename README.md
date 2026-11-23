@@ -12,8 +12,8 @@ An XMPP client for GNOME, built in two parts:
 Goals: users of Conversations, Dino and Converse.js should never notice a
 difference, and OMEMO is on from the first message.
 
-**Status:** early development. Nothing works yet beyond the daemon claiming its
-bus name and the window opening.
+**Status:** early development. The daemon can add an account over D-Bus and
+log in to its server; there is no chatting yet, and the window is a placeholder.
 
 ## Layout
 
@@ -40,7 +40,14 @@ For quick work outside Flatpak:
 ```sh
 cargo build -p piopio-daemon
 cargo run -p piopio --no-default-features   # GTK 4.12+ and libadwaita 1.4+
-dbus-run-session -- cargo test -p piopio-daemon -p piopio-dbus
+cargo test -p piopio-daemon -p piopio-dbus  # needs dbus-daemon
+```
+
+The login test against a real server is ignored unless asked for:
+
+```sh
+PIOPIO_TEST_JID=... PIOPIO_TEST_PASSWORD=... \
+  cargo test -p piopio-daemon --test server -- --ignored
 ```
 
 Set `PIOPIO_LOG=debug` for more daemon output.
