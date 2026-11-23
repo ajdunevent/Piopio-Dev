@@ -132,6 +132,7 @@ pub fn mime_of(name: &str) -> &'static str {
     match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
+        "apng" => "image/apng",
         "gif" => "image/gif",
         "webp" => "image/webp",
         "heic" => "image/heic",
@@ -152,7 +153,7 @@ pub fn mime_of(name: &str) -> &'static str {
 fn is_picture(mime: &str) -> bool {
     matches!(
         mime,
-        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+        "image/jpeg" | "image/png" | "image/apng" | "image/gif" | "image/webp"
     )
 }
 
@@ -196,6 +197,52 @@ pub fn dict_entries(a: &AttachmentRow, map: &mut std::collections::HashMap<Strin
     map.insert("file-path".into(), s(&a.path));
     map.insert("file-thumbnail".into(), s(&a.thumbnail));
     map.insert("file-state".into(), s(&a.state));
+    map.insert(
+        "file-animated".into(),
+        OwnedValue::from(is_animated(&a.path, &a.mime)),
+    );
+}
+
+/// Whether a downloaded picture moves: a GIF with more than one frame, an
+/// APNG, or an animated WebP. Only the start of the file is read.
+pub fn is_animated(path: &str, mime: &str) -> bool {
+    if path.is_empty()
+        || !matches!(
+            mime,
+            "image/gif" | "image/png" | "image/apng" | "image/webp"
+        )
+    {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::with_capacity(64 * 1024);
+    if std::io::Read::read_to_end(&mut std::io::Read::take(file, 64 * 1024), &mut head).is_err() {
+        return false;
+    }
+    animated_bytes(&head)
+}
+
+fn animated_bytes(head: &[u8]) -> bool {
+    let find = |needle: &[u8]| head.windows(needle.len()).position(|w| w == needle);
+    if head.starts_with(b"GIF8") {
+        // Each frame has its own graphic control extension.
+        return head.windows(3).filter(|w| *w == b"\x21\xF9\x04").count() > 1;
+    }
+    if head.starts_with(b"\x89PNG") {
+        // APNG: an acTL chunk before the image data.
+        return match (find(b"acTL"), find(b"IDAT")) {
+            (Some(a), Some(d)) => a < d,
+            (Some(_), None) => true,
+            _ => false,
+        };
+    }
+    if head.len() > 20 && &head[..4] == b"RIFF" && &head[8..16] == b"WEBPVP8X" {
+        // The extended header's animation flag.
+        return head[20] & 0x02 != 0;
+    }
+    false
 }
 
 fn changes(a: &AttachmentRow) -> std::collections::HashMap<&'static str, Value<'static>> {
@@ -207,6 +254,7 @@ fn changes(a: &AttachmentRow) -> std::collections::HashMap<&'static str, Value<'
         ("file-path", Value::from(a.path.clone())),
         ("file-thumbnail", Value::from(a.thumbnail.clone())),
         ("file-state", Value::from(a.state.clone())),
+        ("file-animated", Value::from(is_animated(&a.path, &a.mime))),
     ])
 }
 
@@ -530,6 +578,27 @@ pub async fn keep_own_copy(
     data: Vec<u8>,
 ) -> anyhow::Result<(String, String)> {
     store_file(message, name, mime, data).await
+}
+
+#[cfg(test)]
+mod animation_tests {
+    use super::animated_bytes;
+
+    #[test]
+    fn recognises_animations() {
+        let gif_one = b"GIF89a....\x21\xF9\x04....,";
+        let gif_two = b"GIF89a....\x21\xF9\x04....,....\x21\xF9\x04....,";
+        assert!(!animated_bytes(gif_one));
+        assert!(animated_bytes(gif_two));
+        let apng = b"\x89PNG\r\n\x1a\n....IHDR........acTL........IDAT";
+        let png = b"\x89PNG\r\n\x1a\n....IHDR........IDAT";
+        assert!(animated_bytes(apng));
+        assert!(!animated_bytes(png));
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X\0\0\0\0".to_vec();
+        webp.push(0x02);
+        webp.extend_from_slice(&[0; 8]);
+        assert!(animated_bytes(&webp));
+    }
 }
 
 #[cfg(test)]

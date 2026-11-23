@@ -9,8 +9,10 @@ authors.workspace = true
 
 [dependencies]
 adw = { version = "0.9.2", package = "libadwaita", features = ["v1_5", "gtk_v4_10"] }
+anyhow = "1.0.105"
 async-channel = "2.5.0"
 futures-util = "0.3.34"
+image = { version = "0.25", default-features = false, features = ["gif", "png", "webp"] }
 piopio-call = { version = "0.1.0", path = "../piopio-call" }
 piopio-dbus = { version = "0.1.0", path = "../piopio-dbus" }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "sync"] }

@@ -36,6 +36,9 @@ use crate::store::{ConversationRow, MessageRow, NewMessage, state};
 
 /// Messages fetched from the archive on the very first login.
 const FIRST_SYNC_MESSAGES: usize = 100;
+/// How far back the first sync of an account goes: this many pages of
+/// FIRST_SYNC_MESSAGES, newest first.
+const FIRST_SYNC_PAGES: usize = 30;
 /// Archive pages fetched per catch-up before giving up for this session.
 const MAX_CATCH_UP_PAGES: usize = 50;
 
@@ -1058,8 +1061,15 @@ pub async fn catch_up(session: &Session) {
         .and_then(|a| a.mam_last_id);
     let first_sync = last.is_none();
     let mut after = last;
+    // First sync: pages go backwards from the newest.
+    let mut before = String::new();
+    let pages = if first_sync {
+        FIRST_SYNC_PAGES
+    } else {
+        MAX_CATCH_UP_PAGES
+    };
 
-    for page in 0..MAX_CATCH_UP_PAGES {
+    for page in 0..pages {
         let queryid = if first_sync {
             format!("first-{}", new_id())
         } else {
@@ -1070,7 +1080,7 @@ pub async fn catch_up(session: &Session) {
             SetQuery {
                 max: Some(FIRST_SYNC_MESSAGES),
                 after: None,
-                before: Some(String::new()),
+                before: Some(before.clone()),
                 index: None,
             }
         } else {
@@ -1109,6 +1119,25 @@ pub async fn catch_up(session: &Session) {
                 break;
             }
         };
+        tracing::debug!(page, complete = fin.complete, first = ?fin.set.first, "archive page");
+        if first_sync {
+            // Later catch-ups continue from the newest message of all.
+            if page == 0
+                && let Some(newest) = fin.set.last.clone()
+            {
+                let _ = session
+                    .store
+                    .set_mam_last_id(session.account_id, newest)
+                    .await;
+                // The newest are in: live messages may count again.
+                session.caught_up.store(true, Ordering::SeqCst);
+            }
+            match fin.set.first.clone() {
+                Some(oldest) if !fin.complete => before = oldest.item,
+                _ => break,
+            }
+            continue;
+        }
         if let Some(newest) = fin.set.last.clone() {
             let _ = session
                 .store
@@ -1116,8 +1145,20 @@ pub async fn catch_up(session: &Session) {
                 .await;
             after = Some(newest);
         }
-        if first_sync || fin.complete || fin.set.last.is_none() {
+        if fin.complete || fin.set.last.is_none() {
             break;
+        }
+    }
+    if first_sync {
+        // Everyone in the roster gets a conversation, history or not.
+        if let Ok(contacts) = session.store.contacts(session.account_id).await {
+            for contact in contacts {
+                if let Ok(jid) = contact.jid.parse::<BareJid>()
+                    && jid.node().is_some()
+                {
+                    let _ = session.conversations.get(session, &jid).await;
+                }
+            }
         }
     }
     session.caught_up.store(true, Ordering::SeqCst);

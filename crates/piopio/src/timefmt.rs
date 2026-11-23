@@ -128,6 +128,10 @@ fn days_between(when: &glib::DateTime, now: &glib::DateTime) -> i64 {
 /// For the conversation list: the time today, the weekday within the last
 /// week, the date before that.
 pub fn short(ms: i64) -> String {
+    // Never active (a contact with no history yet).
+    if ms <= 0 {
+        return String::new();
+    }
     let Some((when, now)) = local(ms) else {
         return String::new();
     };

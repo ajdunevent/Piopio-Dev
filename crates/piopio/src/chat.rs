@@ -166,7 +166,7 @@ impl ChatPage {
         // Red with an open lock until the conversation is known to be
         // encrypted.
         let send = gtk::Button::builder()
-            .icon_name("changes-allow-symbolic")
+            .icon_name("paper-plane-unencrypted-symbolic")
             .tooltip_text("Send Unencrypted")
             .css_classes(["destructive-action", "send"])
             .build();
@@ -986,7 +986,7 @@ impl ChatPage {
                     this.send.set_tooltip_text(Some("Send Encrypted"));
                     this.send.set_css_classes(&["suggested-action", "send"]);
                 } else {
-                    this.send.set_icon_name("changes-allow-symbolic");
+                    this.send.set_icon_name("paper-plane-unencrypted-symbolic");
                     this.send.set_tooltip_text(Some("Send Unencrypted"));
                     this.send.set_css_classes(&["destructive-action", "send"]);
                 }
@@ -1267,14 +1267,23 @@ impl ChatPage {
         );
         if outgoing {
             let state = text(m, "state");
-            meta.append(
-                &gtk::Image::builder()
-                    .icon_name(state_icon(&state))
-                    .tooltip_text(state_name(&state))
-                    .pixel_size(14)
-                    .css_classes(["message-state"])
-                    .build(),
-            );
+            // Dimmed until the server has it; then a check once delivered
+            // and two once read.
+            if state == "pending" {
+                bubble.add_css_class("pending");
+                bubble.set_tooltip_text(Some(state_name(&state)));
+            }
+            let icon = state_icon(&state);
+            if !icon.is_empty() {
+                meta.append(
+                    &gtk::Image::builder()
+                        .icon_name(icon)
+                        .tooltip_text(state_name(&state))
+                        .pixel_size(16)
+                        .css_classes(["message-state"])
+                        .build(),
+                );
+            }
         }
         bubble.append(&meta);
 
@@ -1308,6 +1317,12 @@ impl ChatPage {
         let path = text(m, "file-path");
         let thumbnail = text(m, "file-thumbnail");
         let name = text(m, "file-name");
+        if !thumbnail.is_empty() && !path.is_empty() && flag(m, "file-animated") {
+            let p = path.clone();
+            let player = crate::animation::player(&thumbnail, &path, move || open_file(&p));
+            player.set_tooltip_text(Some(&name));
+            return player;
+        }
         if !thumbnail.is_empty() {
             let picture = gtk::Picture::for_filename(&thumbnail);
             picture.set_can_shrink(true);
@@ -1809,12 +1824,10 @@ fn texture(path: &str) -> Option<gdk::Texture> {
         .flatten()
 }
 
-/// One icon that grows as the message goes further: sending (…), sent to
-/// the server (one check), delivered to a device (two), read (three).
+/// Delivered: one check; read: two, overlapping (Dino's). Sending shows
+/// as a dimmed bubble instead, and sent to the server needs no mark.
 fn state_icon(state: &str) -> &'static str {
     match state {
-        "pending" => "message-sending-symbolic",
-        "sent" => "message-sent-symbolic",
         "received" => "message-delivered-symbolic",
         "displayed" => "message-read-symbolic",
         "failed" => "dialog-warning-symbolic",

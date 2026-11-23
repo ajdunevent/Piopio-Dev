@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Piopio, GPL-3.0-or-later -->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <circle fill="#222222" cx="3" cy="8" r="1.5"/>
-  <circle fill="#222222" cx="8" cy="8" r="1.5"/>
-  <circle fill="#222222" cx="13" cy="8" r="1.5"/>
-</svg>

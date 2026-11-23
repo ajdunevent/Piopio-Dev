@@ -45,6 +45,7 @@ avatar { border-radius: 22%; }
 .message.outgoing { margin-left: 40px; }
 .bubble.outgoing .dim-label { color: inherit; opacity: 0.75; }
 .message-state { opacity: 0.8; }
+.bubble.pending { opacity: 0.55; }
 .chat-history > row.continued { padding-top: 0; }
 .undecryptable { font-style: italic; opacity: 0.7; }
 .bubble .quote {

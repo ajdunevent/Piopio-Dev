@@ -157,7 +157,9 @@ impl Window {
         let split = adw::NavigationSplitView::builder()
             .sidebar(&adw::NavigationPage::new(&sidebar, "Piopio"))
             .content(&placeholder)
-            .min_sidebar_width(260.0)
+            .min_sidebar_width(280.0)
+            .max_sidebar_width(420.0)
+            .sidebar_width_fraction(0.32)
             .build();
 
         let toasts = adw::ToastOverlay::new();
@@ -645,6 +647,7 @@ impl Window {
             },
         );
         store_sort_keys(&row, last, pinned);
+        store_sort_name(&row, &title);
         self.list.invalidate_sort();
         self.update_sidebar();
 
@@ -734,6 +737,7 @@ impl Window {
             RowEvent::Title(t) => {
                 entry.name.set_label(&t);
                 entry.avatar.set_text(Some(&t));
+                store_sort_name(&entry.row, &t);
             }
             RowEvent::Avatar(path) => set_avatar_image(&entry.avatar, &path),
             RowEvent::Muted(m) => entry.mute.set_visible(m == "always"),
@@ -860,10 +864,16 @@ fn preview(m: &Dict, room: bool) -> String {
         .and_then(|v| bool::try_from(v).ok())
         .unwrap_or(false);
     let first_line = body.lines().next().unwrap_or("").to_owned();
+    // A shared file's message is its link: show the file's name instead.
     let file = text(m, "file-name");
+    let is_link = first_line.starts_with("aesgcm://") || first_line.starts_with("https://");
     let first_line =
-        if !file.is_empty() && (first_line.is_empty() || first_line.starts_with("http")) {
-            file
+        if first_line.starts_with("aesgcm://") || (is_link && !text(m, "file-state").is_empty()) {
+            if file.is_empty() {
+                "File".to_owned()
+            } else {
+                file
+            }
         } else {
             first_line
         };
@@ -915,8 +925,26 @@ fn sort_keys(row: &gtk::ListBoxRow) -> (bool, i64) {
     }
 }
 
+/// Pinned first, then the most recently active, then by name (as Dino).
 fn sort_rows(a: &gtk::ListBoxRow, b: &gtk::ListBoxRow) -> gtk::Ordering {
     let (pa, la) = sort_keys(a);
     let (pb, lb) = sort_keys(b);
-    (pb, lb).cmp(&(pa, la)).into()
+    (pb, lb)
+        .cmp(&(pa, la))
+        .then_with(|| sort_name(a).cmp(&sort_name(b)))
+        .into()
+}
+
+fn store_sort_name(row: &gtk::ListBoxRow, name: &str) {
+    unsafe {
+        row.set_data("piopio-name", name.to_lowercase());
+    }
+}
+
+fn sort_name(row: &gtk::ListBoxRow) -> String {
+    unsafe {
+        row.data::<String>("piopio-name")
+            .map(|p| p.as_ref().clone())
+            .unwrap_or_default()
+    }
 }

@@ -3,6 +3,7 @@
 //! The UI holds no protocol state and no connections of its own. Closing the
 //! window ends this process and frees its memory; the daemon keeps running.
 
+mod animation;
 mod calls;
 mod chat;
 mod client;
