@@ -134,6 +134,8 @@ impl Daemon {
             .ok_or_else(|| zbus::fdo::Error::UnknownObject(account.to_string()))?;
         let removed = accounts.by_jid.remove(&jid).expect("found above");
         let id = removed.id;
+        // Contacts should stop encrypting for a device that is going away.
+        crate::omemo::retire(&removed.session).await;
         removed.stop().await;
         accounts.store.remove_account(id).await.map_err(failed)?;
         Ok(())

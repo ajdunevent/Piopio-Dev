@@ -44,6 +44,10 @@ async fn logs_in_to_the_test_server() {
         error.is_empty(),
         "Error should be cleared once connected: {error}"
     );
+    // OMEMO: the device and bundle publish on a real server too. Removing
+    // the account takes the device out of the list again, so test runs
+    // don't pile up dead devices on the test account.
+    test.wait_published(&path).await;
 
     daemon.remove_account(&path.as_ref()).await.unwrap();
 }

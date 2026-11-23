@@ -72,6 +72,8 @@ pub struct OmemoState {
     fetched: Mutex<HashMap<String, Instant>>,
     /// Whether our device and bundle are published for this login.
     published: AtomicBool,
+    /// Set while the account is being removed: don't re-announce ourselves.
+    retiring: AtomicBool,
     /// Held while sessions are used, so each is used by one message at a time.
     sessions: Mutex<()>,
 }
@@ -397,6 +399,43 @@ pub async fn online(shared: &Shared) {
     }
 }
 
+/// Takes our device out of the account's device list and deletes its
+/// bundle (when the account is removed from this computer). Best effort.
+pub async fn retire(shared: &Shared) {
+    if !shared.is_online() {
+        return;
+    }
+    let Ok(Some(_)) = shared.store.omemo_own(shared.account_id).await else {
+        return;
+    };
+    let Ok((own_id, _)) = own_device(shared).await else {
+        return;
+    };
+    shared.omemo.retiring.store(true, Ordering::SeqCst);
+    let jid = shared.jid.clone();
+    if let Some(list) = fetch_item(shared, &jid, ns::LEGACY_OMEMO_DEVICELIST).await {
+        let ids: Vec<u32> = device_ids(&list)
+            .into_iter()
+            .filter(|id| *id != own_id)
+            .collect();
+        publish(
+            shared,
+            ns::LEGACY_OMEMO_DEVICELIST,
+            "current",
+            device_list(&ids),
+        )
+        .await;
+    }
+    let delete = Element::builder("pubsub", ns::PUBSUB_OWNER)
+        .append(
+            Element::builder("delete", ns::PUBSUB_OWNER)
+                .attr(n("node"), omemo::bundle_node(own_id))
+                .build(),
+        )
+        .build();
+    let _ = shared.iq(set(None, delete)).await;
+}
+
 /// Handles a PEP notification. Returns true if it was an OMEMO one.
 pub async fn event(shared: &Shared, from: Option<&Jid>, event: &Element) -> bool {
     let Some(items) = event.get_child("items", ns::PUBSUB_EVENT) else {
@@ -429,7 +468,8 @@ pub async fn event(shared: &Shared, from: Option<&Jid>, event: &Element) -> bool
         .insert(jid.to_string(), Instant::now());
     if jid == shared.jid {
         // Another of our clients may have replaced the list without us.
-        if let Ok((own_id, _)) = own_device(shared).await
+        if !shared.omemo.retiring.load(Ordering::SeqCst)
+            && let Ok((own_id, _)) = own_device(shared).await
             && !ids.contains(&own_id)
         {
             let mut ids = ids.clone();

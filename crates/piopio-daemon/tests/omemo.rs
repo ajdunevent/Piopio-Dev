@@ -128,3 +128,41 @@ async fn encryption_and_trust() {
     })
     .await;
 }
+
+/// Removing an account takes its device out of the published list.
+#[tokio::test]
+async fn removed_account_retires_its_device() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    // Uses its own JIDs' device lists only through the server, so pick a
+    // user no other test adds devices for concurrently: frank's list is read
+    // by erin's test, but only for erin's devices.
+    let one = TestDaemon::start().await.unwrap();
+    let two = TestDaemon::start().await.unwrap();
+    let (one_path, _) = one.add_local("bob").await;
+    let (two_path, _) = two.add_local("bob").await;
+    let one_device = one.wait_published(&one_path).await;
+    two.wait_published(&two_path).await;
+    two.wait_device(&two_path, "bob@localhost", one_device)
+        .await;
+
+    one.daemon()
+        .await
+        .remove_account(&one_path.as_ref())
+        .await
+        .unwrap();
+    let omemo = two.omemo(two_path.clone()).await;
+    wait_for(20, "the removed device to become inactive", || async {
+        omemo
+            .get_devices("bob@localhost")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|d| d.get("device-id").and_then(|v| u32::try_from(v).ok()) == Some(one_device))
+            .filter(|d| d.get("active").and_then(|v| bool::try_from(v).ok()) == Some(false))
+            .map(|_| ())
+    })
+    .await;
+}
