@@ -253,6 +253,60 @@ impl Window {
         });
         self.accounts.borrow_mut().push(info.clone());
 
+        // Invitations to group chats → a toast with Join.
+        let invitations = {
+            let proxy = proxy.clone();
+            client::forward(move || async move {
+                let s = proxy.receive_room_invitation().await.ok()?;
+                Some(s.filter_map(|i| async move {
+                    let a = i.args().ok()?;
+                    Some((
+                        a.room().to_string(),
+                        a.from().to_string(),
+                        a.password().to_string(),
+                    ))
+                }))
+            })
+        };
+        let weak = Rc::downgrade(self);
+        let account = proxy.clone();
+        glib::spawn_future_local(async move {
+            while let Ok((room, from, password)) = invitations.recv().await {
+                let Some(this) = weak.upgrade() else { break };
+                let toast = adw::Toast::builder()
+                    .title(
+                        glib::markup_escape_text(&format!("{from} invited you to {room}")).as_str(),
+                    )
+                    .button_label("Join")
+                    .timeout(0)
+                    .build();
+                let (account, w) = (account.clone(), Rc::downgrade(&this));
+                toast.connect_button_clicked(move |_| {
+                    let (account, room, password, w) =
+                        (account.clone(), room.clone(), password.clone(), w.clone());
+                    glib::spawn_future_local(async move {
+                        let result = run(async move {
+                            let mut options = HashMap::new();
+                            if !password.is_empty() {
+                                options.insert("password", zbus::zvariant::Value::from(password));
+                            }
+                            account.join_room(&room, "", options).await
+                        })
+                        .await;
+                        let Some(w) = w.upgrade() else { return };
+                        match result {
+                            Ok(path) => {
+                                w.add_conversation(path.clone()).await;
+                                w.open_conversation(path.as_str());
+                            }
+                            Err(e) => w.toast(&client::explain(&e)),
+                        }
+                    });
+                });
+                this.toasts.add_toast(toast);
+            }
+        });
+
         // Connection state → banner.
         let changes = {
             let proxy = proxy.clone();

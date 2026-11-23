@@ -293,7 +293,9 @@ impl ChatPage {
                 this.page.set_title(&name);
                 if kind == "room" {
                     this.is_room.set(true);
-                    this.lock.set_visible(false);
+                    // The lock still shows whether the room is encrypted,
+                    // but there is no per-person dialog behind it.
+                    this.lock.set_sensitive(false);
                     this.setup_room().await;
                 }
             }
@@ -387,6 +389,46 @@ impl ChatPage {
                 .hscrollbar_policy(gtk::PolicyType::Never)
                 .build(),
         );
+        let invite_entry = gtk::Entry::builder()
+            .placeholder_text("Invite (name@example.org)")
+            .hexpand(true)
+            .input_purpose(gtk::InputPurpose::Email)
+            .build();
+        let invite_button = gtk::Button::builder()
+            .icon_name("list-add-symbolic")
+            .tooltip_text("Invite")
+            .build();
+        let invite_row = gtk::Box::builder()
+            .spacing(6)
+            .css_classes(["linked"])
+            .build();
+        invite_row.append(&invite_entry);
+        invite_row.append(&invite_button);
+        content.append(&invite_row);
+        {
+            let (room, entry, window) = (room.clone(), invite_entry.clone(), self.window.clone());
+            let do_invite = move || {
+                let who = entry.text().trim().to_string();
+                if !who.contains('@') {
+                    return;
+                }
+                entry.set_text("");
+                let (room, window) = (room.clone(), window.clone());
+                glib::spawn_future_local(async move {
+                    let target = who.clone();
+                    let result = run(async move { room.invite(&target, "").await }).await;
+                    if let Some(w) = window.upgrade() {
+                        match result {
+                            Ok(()) => w.toast(&format!("Invited {who}")),
+                            Err(e) => w.toast(&client::explain(&e)),
+                        }
+                    }
+                });
+            };
+            let again = do_invite.clone();
+            invite_entry.connect_activate(move |_| again());
+            invite_button.connect_clicked(move |_| do_invite());
+        }
         content.append(&leave);
         self.people
             .set_popover(Some(&gtk::Popover::builder().child(&content).build()));

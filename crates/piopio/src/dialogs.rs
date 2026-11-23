@@ -194,6 +194,12 @@ pub fn join_room(window: &Rc<Window>) {
     group.add(&address);
     group.add(&nick);
     group.add(&password);
+    let private = adw::SwitchRow::builder()
+        .title("Private and Encrypted")
+        .subtitle("If the room is new: only people you invite can join, and messages use OMEMO")
+        .active(true)
+        .build();
+    group.add(&private);
     let join = gtk::Button::builder()
         .label("Join")
         .css_classes(["pill", "suggested-action"])
@@ -239,6 +245,7 @@ pub fn join_room(window: &Rc<Window>) {
         let jid = address.text().trim().to_string();
         let nick = nick.text().trim().to_string();
         let password = password.text().to_string();
+        let private = private.is_active();
         let (w, d, button) = (w.clone(), d.clone(), button.clone());
         button.set_sensitive(false);
         glib::spawn_future_local(async move {
@@ -248,6 +255,7 @@ pub fn join_room(window: &Rc<Window>) {
                 if !password.is_empty() {
                     options.insert("password", zbus::zvariant::Value::from(password));
                 }
+                options.insert("private", zbus::zvariant::Value::from(private));
                 proxy.join_room(&jid, &nick, options).await
             })
             .await;
