@@ -1,6 +1,6 @@
 #!/bin/bash
 # Starts a throwaway Prosody on 127.0.0.1:15222 with the accounts the tests use
-# (alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy, kim, leo and mia @localhost, password "password"), runs the given
+# (alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy, kim, leo, mia, nora and owen @localhost, password "password"), runs the given
 # command, then stops the server.
 #
 #   tests/server/run.sh cargo test -p piopio-daemon --test messaging
@@ -16,7 +16,7 @@ mkdir -p "$PIOPIO_TEST_SERVER_DIR/data" "$PIOPIO_TEST_SERVER_DIR/certs"
 sed -e "s|@DIR@|$PIOPIO_TEST_SERVER_DIR|g" -e "s|@USER@|$USER|g" \
     "$here/prosody.cfg.lua" >"$cfg"
 
-for user in alice bob carol dave erin frank grace heidi ivan judy kim leo mia; do
+for user in alice bob carol dave erin frank grace heidi ivan judy kim leo mia nora owen; do
     if ! out=$(prosodyctl --config "$cfg" register "$user" localhost password 2>&1); then
         echo "Could not create $user@localhost:" >&2
         echo "$out" >&2

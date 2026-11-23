@@ -291,7 +291,8 @@ pub async fn forget(session: &Session, room: &BareJid) {
 
 /// After every login: learn the bookmarks and join the rooms to join.
 pub async fn online(session: &Session) {
-    if let Some(items) = crate::pep::fetch_all(session, BOOKMARKS).await {
+    let pep = session.features.server_has(crate::features::PEP);
+    if pep && let Some(items) = crate::pep::fetch_all(session, BOOKMARKS).await {
         for (id, conference) in items {
             bookmark_learned(session, &id, &conference).await;
         }

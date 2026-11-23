@@ -144,6 +144,11 @@ pub trait Account {
     #[zbus(property)]
     fn set_send_receipts(&self, on: bool) -> zbus::Result<()>;
 
+    /// What the server supports, plus "pep" and "urn:xmpp:http:upload:0"
+    /// for its PEP and upload services. Empty until known.
+    #[zbus(property)]
+    fn server_features(&self) -> zbus::Result<Vec<String>>;
+
     /// Blocks `jid` on the server (XEP-0191), for every device.
     fn block(&self, jid: &str) -> zbus::Result<()>;
     fn unblock(&self, jid: &str) -> zbus::Result<()>;
@@ -267,6 +272,10 @@ pub trait Conversation {
     /// Whether the peer sees that we've read their messages.
     #[zbus(property)]
     fn receipts_enabled(&self) -> zbus::Result<bool>;
+
+    /// What the peer's apps support; empty when unknown.
+    #[zbus(property)]
+    fn peer_features(&self) -> zbus::Result<Vec<String>>;
 
     /// Whether the peer is on our blocklist.
     #[zbus(property)]

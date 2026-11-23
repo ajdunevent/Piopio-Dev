@@ -162,6 +162,14 @@ impl AccountObject {
         self.set_blocked(jid, false).await
     }
 
+    /// What the server supports: its disco#info features and our
+    /// account's, plus "pep" for a PEP service and
+    /// "urn:xmpp:http:upload:0" for an upload service. Empty until known.
+    #[zbus(property)]
+    fn server_features(&self) -> Vec<String> {
+        self.session.features.server_list()
+    }
+
     #[zbus(property)]
     fn nickname(&self) -> String {
         String::new()
@@ -242,6 +250,11 @@ impl AccountObject {
         .await
         .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
         .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        if !self.session.features.server_has(crate::features::PEP) {
+            return Err(zbus::fdo::Error::NotSupported(
+                "the server can't store pictures (no PEP)".into(),
+            ));
+        }
         crate::avatars::set_own(&self.session, data)
             .await
             .map_err(|e| zbus::fdo::Error::Failed(format!("{e:#}")))
@@ -354,6 +367,19 @@ pub async fn set_state(iface: &InterfaceRef<AccountObject>, state: State, error:
     }
 }
 
+/// Re-announces an account's ServerFeatures.
+pub async fn features_changed(session: &Session) {
+    if let Ok(iface) = session
+        .bus
+        .object_server()
+        .interface::<_, AccountObject>(&session.path)
+        .await
+    {
+        let object = iface.get().await;
+        let _ = object.server_features_changed(iface.signal_emitter()).await;
+    }
+}
+
 impl AccountObject {
     async fn save_privacy(&self) {
         let _ = self
@@ -373,6 +399,11 @@ impl AccountObject {
             .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("not a valid JID: {e}")))?;
         if !self.session.is_online() {
             return Err(zbus::fdo::Error::Failed("the account is offline".into()));
+        }
+        if !self.session.features.server_has(crate::features::BLOCKING) {
+            return Err(zbus::fdo::Error::NotSupported(
+                "the server doesn't support blocking".into(),
+            ));
         }
         crate::blocking::set(&self.session, &jid, blocked)
             .await

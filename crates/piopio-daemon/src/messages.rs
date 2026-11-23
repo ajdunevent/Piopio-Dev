@@ -199,6 +199,17 @@ impl Conversations {
         }
     }
 
+    /// Re-announces a conversation's PeerFeatures.
+    pub async fn features_changed(&self, shared: &Shared, jid: &str) {
+        let Some((_, path)) = self.by_peer.lock().await.get(jid).cloned() else {
+            return;
+        };
+        if let Some(iface) = self.iface(shared, &path).await {
+            let object = iface.get().await;
+            let _ = object.peer_features_changed(iface.signal_emitter()).await;
+        }
+    }
+
     /// Re-announces a conversation's Blocked (the blocklist changed).
     pub async fn blocked_changed(&self, shared: &Shared, jid: &str) {
         let Some((_, path)) = self.by_peer.lock().await.get(jid).cloned() else {
@@ -279,6 +290,10 @@ enum Source {
 
 /// Turns on Carbons so messages to and from our other devices show up here.
 pub async fn enable_carbons(shared: &Shared) {
+    if !shared.features.server_has(crate::features::CARBONS) {
+        tracing::info!("the server doesn't support carbons");
+        return;
+    }
     if let Err(e) = shared.iq(Iq::from_set("", carbons::Enable)).await {
         tracing::info!("the server did not enable carbons: {e}");
     }
@@ -1009,6 +1024,11 @@ async fn set_unread(session: &Session, peer: &BareJid, unread: u32) {
 
 /// Fetches what arrived while we were offline from our own archive.
 pub async fn catch_up(session: &Session) {
+    if !session.features.server_has(crate::features::MAM) {
+        tracing::info!("the server keeps no message archive");
+        session.caught_up.store(true, Ordering::SeqCst);
+        return;
+    }
     let last = session
         .store
         .accounts()
@@ -1558,6 +1578,16 @@ impl ConversationObject {
     #[zbus(property)]
     fn receipts_enabled(&self) -> bool {
         self.sends_receipts()
+    }
+
+    /// What the peer's apps support (disco#info features of their online
+    /// devices, or what they last had). Empty when unknown.
+    #[zbus(property)]
+    async fn peer_features(&self) -> Vec<String> {
+        if self.is_room() {
+            return vec![];
+        }
+        crate::features::peer(&self.session, &self.row.peer).await
     }
 
     /// Whether the peer is on our blocklist (XEP-0191). Account.Block and

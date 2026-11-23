@@ -37,6 +37,9 @@ fn items(element: &Element) -> impl Iterator<Item = String> + '_ {
 
 /// Fetches the list after connecting.
 pub async fn online(session: &Session) {
+    if !session.features.server_has(crate::features::BLOCKING) {
+        return;
+    }
     let query = Element::builder("blocklist", NS).build();
     let Ok(Some(reply)) = session.iq(crate::pep::get(None, query)).await else {
         return;

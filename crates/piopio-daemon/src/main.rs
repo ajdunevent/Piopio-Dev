@@ -12,6 +12,7 @@ mod blocking;
 mod connect;
 mod daemon;
 mod disco;
+mod features;
 mod files;
 mod jingle;
 mod jingle_sdp;

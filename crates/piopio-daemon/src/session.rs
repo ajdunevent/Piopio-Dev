@@ -82,6 +82,7 @@ pub struct Shared {
     pub uploads: crate::files::Uploads,
     pub calls: crate::jingle::Calls,
     pub blocked: crate::blocking::Blocklist,
+    pub features: crate::features::Features,
     /// The account's defaults: whether contacts see that we're typing, and
     /// that we've read their messages.
     pub send_chat_states: AtomicBool,
@@ -158,6 +159,7 @@ pub fn new_shared(
         uploads: crate::files::Uploads::default(),
         calls: crate::jingle::Calls::default(),
         blocked: crate::blocking::Blocklist::default(),
+        features: crate::features::Features::default(),
         send_chat_states: AtomicBool::new(true),
         send_receipts: AtomicBool::new(true),
     })
@@ -294,7 +296,10 @@ async fn run(
                 Some(Event::Stream(StreamEvent::Suspended)) => {
                     tracing::info!(jid = %shared.jid, "connection lost, reconnecting");
                     let s = shared.clone();
-                    tokio::spawn(async move { crate::jingle::offline(&s).await });
+                    tokio::spawn(async move {
+                        crate::jingle::offline(&s).await;
+                        s.features.offline().await;
+                    });
                     connected = false;
                     shared.online.send_replace(false);
                     set_state(&iface, State::Connecting, None).await;
@@ -338,11 +343,12 @@ async fn run(
 /// Runs after every login that lost state (not after a resumption).
 async fn came_online(shared: Session, features: StreamFeatures) {
     shared.caught_up.store(false, Ordering::SeqCst);
+    shared.uploads.forget().await;
+    crate::features::discover_server(&shared).await;
     roster::fetch(&shared).await;
     messages::enable_carbons(&shared).await;
     send_presence(&shared).await;
     let _ = features;
-    shared.uploads.forget().await;
     crate::blocking::online(&shared).await;
     crate::omemo::online(&shared).await;
     crate::rooms::online(&shared).await;
@@ -413,6 +419,7 @@ async fn handle_stanza(shared: &Session, stanza: Stanza) {
         Stanza::Presence(presence) => {
             if !crate::rooms::presence(shared, &presence).await {
                 crate::avatars::presence(shared, &presence);
+                crate::features::presence(shared, &presence);
                 roster::presence(shared, presence).await
             }
         }

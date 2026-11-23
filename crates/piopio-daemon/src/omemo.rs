@@ -269,6 +269,11 @@ async fn publish_bundle(shared: &Shared) {
 /// After every login: make sure our device is announced and our bundle is
 /// current, and learn our other devices.
 pub async fn online(shared: &Shared) {
+    // Devices and keys are published with PEP.
+    if !shared.features.server_has(crate::features::PEP) {
+        tracing::warn!("the server has no PEP service, so OMEMO can't be used");
+        return;
+    }
     shared.omemo.fetched.lock().await.clear();
     shared.omemo.published.store(false, Ordering::SeqCst);
     let Ok((own_id, _)) = own_device(shared).await else {

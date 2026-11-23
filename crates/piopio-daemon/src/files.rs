@@ -391,6 +391,11 @@ fn make_thumbnail(data: &[u8], to: &Path) -> anyhow::Result<()> {
 
 // --- sending ---------------------------------------------------------------
 
+/// Whether the server has an upload service.
+pub(crate) async fn has_upload_service(session: &Shared) -> bool {
+    service(session).await.is_some()
+}
+
 /// Finds the server's upload service and its size limit.
 async fn service(session: &Shared) -> Option<Service> {
     let mut cached = session.uploads.service.lock().await;

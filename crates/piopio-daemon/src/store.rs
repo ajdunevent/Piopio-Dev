@@ -162,6 +162,15 @@ const SCHEMA: &[&str] = &[
     ALTER TABLE conversations ADD COLUMN send_chat_states TEXT NOT NULL DEFAULT 'default';
     ALTER TABLE conversations ADD COLUMN send_receipts TEXT NOT NULL DEFAULT 'default';
     "#,
+    // Version 9: what contacts' apps support, for while they're offline
+    r#"
+    CREATE TABLE peer_features (
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        jid        TEXT NOT NULL,
+        features   TEXT NOT NULL,
+        PRIMARY KEY (account_id, jid)
+    );
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -313,6 +322,42 @@ impl Store {
         })
         .await?
         .map_err(Into::into)
+    }
+
+    // Contacts' features
+
+    pub async fn set_peer_features(
+        &self,
+        account: i64,
+        jid: String,
+        features: Vec<String>,
+    ) -> anyhow::Result<()> {
+        let json = serde_json::to_string(&features)?;
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO peer_features (account_id, jid, features) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (account_id, jid) DO UPDATE SET features = excluded.features",
+                params![account, jid, json],
+            )
+            .map(drop)
+        })
+        .await
+    }
+
+    pub async fn peer_features(&self, account: i64, jid: String) -> anyhow::Result<Vec<String>> {
+        self.with(move |db| {
+            let json: Option<String> = db
+                .query_row(
+                    "SELECT features FROM peer_features WHERE account_id = ?1 AND jid = ?2",
+                    params![account, jid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(json
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default())
+        })
+        .await
     }
 
     // Accounts
