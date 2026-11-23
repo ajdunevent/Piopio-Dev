@@ -14,6 +14,27 @@ difference, and OMEMO is on from the first message.
 
 **Status:** early development. See [What works](#what-works).
 
+## What works
+
+- **Accounts:** add, log in (STARTTLS, SCRAM), turn off and on, change the
+  password, remove. Accounts and everything else live in an encrypted
+  SQLCipher database whose key is kept in the keyring (the Secret portal
+  inside Flatpak), and reconnect when the daemon starts.
+- **Contacts:** roster with versioning, presence, adding and renaming
+  contacts, accepting or declining contact requests.
+- **One-to-one chat:** sending and receiving, delivery receipts and read
+  markers, Carbons for your other devices, and catch-up from the server
+  archive (MAM) after being offline; duplicates are dropped.
+- **Background:** the daemon runs with no window, asks the Background portal
+  for autostart inside Flatpak, and shows notifications through the
+  Notification portal while no window is open. Clicking one opens the chat.
+- **Window:** conversation list, chat with an always-visible Send button,
+  delivery ticks, Add Account, New Chat, Accounts; adapts down to 360px.
+
+Not yet: OMEMO (milestone 2), group chats, files, avatars, reactions,
+corrections, calls, Client State Indication (blocked on tokio-xmpp sending
+nonzas), direct TLS and SASL2/FAST.
+
 ## Layout
 
 | Path | What it is |
@@ -21,6 +42,7 @@ difference, and OMEMO is on from the first message.
 | `crates/piopio-daemon` | The background service (`net.dunevent.Piopio.Daemon`) |
 | `crates/piopio` | The UI (`net.dunevent.Piopio`) |
 | `crates/piopio-dbus` | Bus names, object paths and client proxies shared by both |
+| `tests/server` | A throwaway local Prosody for the end-to-end tests |
 | `data/` | Desktop file, metainfo, D-Bus service file, icons |
 | `build-aux/` | Flatpak manifest for the GNOME 51 runtime |
 | `piopio.doap` | Description for xmpp.org's software list |
