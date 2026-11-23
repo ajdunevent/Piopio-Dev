@@ -517,7 +517,11 @@ pub fn accounts(window: &Rc<Window>) {
             let (proxy, picture, w) = (account.proxy.clone(), picture.clone(), window.clone());
             choose.connect_clicked(move |_| {
                 let filter = gtk::FileFilter::new();
-                filter.add_pixbuf_formats();
+                // The formats the daemon reads (add_pixbuf_formats is
+                // deprecated since GTK 4.20).
+                for mime in ["image/png", "image/jpeg", "image/gif", "image/webp"] {
+                    filter.add_mime_type(mime);
+                }
                 filter.set_name(Some("Pictures"));
                 let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
                 filters.append(&filter);

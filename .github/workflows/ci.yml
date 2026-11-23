@@ -119,6 +119,15 @@ jobs:
           bundle: piopio.flatpak
           manifest-path: build-aux/net.dunevent.Piopio.Devel.yml
           cache-key: flatpak-builder-${{ github.sha }}
+      # Lints against GNOME 51's GTK and libadwaita, which the other jobs
+      # can't: deprecations there only show up here.
+      - name: Clippy against GNOME 51
+        run: |
+          flatpak run --share=network --filesystem="$PWD" \
+            --env=PATH=/usr/bin:/usr/lib/sdk/rust-stable/bin \
+            --env=CARGO_TARGET_DIR="$PWD/target-gnome51" \
+            --command=sh org.gnome.Sdk//51 -c \
+            "cd '$PWD' && cargo clippy --locked -p piopio --all-targets -- -D warnings"
       # Which call elements the GNOME runtime has (information for now).
       - name: GStreamer WebRTC in the runtime
         continue-on-error: true

@@ -5,3 +5,4 @@ repo/
 *.flatpak
 dist/
 .flatpak/
+target-gnome51/
