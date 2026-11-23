@@ -16,3 +16,11 @@ piopio-dbus = { path = "crates/piopio-dbus" }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# For build-aux/dev.sh: optimised, but quick to rebuild.
+[profile.release-dev]
+inherits = "release"
+opt-level = 2
+incremental = true
+codegen-units = 256
+lto = false

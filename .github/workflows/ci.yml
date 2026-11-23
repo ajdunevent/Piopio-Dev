@@ -128,6 +128,26 @@ jobs:
               && echo "$e: yes" || echo "$e: MISSING"
           done
 
+  # build-aux/dev.sh, answering its prompts: this machine, a Flatpak file,
+  # a debug build. Only on manual runs, since it compiles everything again.
+  dev-sh:
+    name: dev.sh (manual runs)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
+      options: >-
+        --privileged
+        -v /usr/local/lib/android:/host/android
+        -v /usr/share/dotnet:/host/dotnet
+        -v /opt/hostedtoolcache:/host/toolcache
+    steps:
+      - name: Free disk space
+        run: rm -rf /host/android/* /host/dotnet/* /host/toolcache/*
+      - uses: actions/checkout@v4
+      - run: printf '1\n1\n2\n' | build-aux/dev.sh
+      - run: ls -lh dist/
+
   # Logs in to the test account on a real server. Skipped until the repository
   # has the PIOPIO_TEST_JID and PIOPIO_TEST_PASSWORD Actions secrets.
   integration:
