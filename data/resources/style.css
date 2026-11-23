@@ -1,0 +1,67 @@
+/* Piopio's styles. Named colors (@accent_bg_color and so on) keep this
+   working on the older libadwaita used for development builds. */
+
+/* The conversation list, after Dino's. */
+.conversation-list > row { padding: 0; }
+.conversation-row { padding: 8px 6px; }
+.conversation-row .name { font-weight: 600; }
+.conversation-row .time { font-size: smaller; }
+.conversation-row .preview { opacity: 0.7; }
+.unread .conversation-row .name,
+.unread .conversation-row .time { font-weight: 800; }
+.unread .conversation-row .preview { opacity: 1; }
+.conversation-row .typing { color: @accent_color; font-style: italic; opacity: 1; }
+.conversation-row .flag { opacity: 0.55; }
+.unread-badge {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+  border-radius: 999px; padding: 0 7px; min-width: 10px;
+  font-size: smaller; font-weight: bold;
+}
+
+/* Status: a dot coloured by availability. */
+.status-dot {
+  min-width: 12px; min-height: 12px; border-radius: 999px;
+  background-color: alpha(currentColor, 0.35);
+}
+.status-dot.available { background-color: @success_color; }
+.status-dot.away { background-color: @warning_color; }
+.status-dot.dnd { background-color: @error_color; }
+
+/* The chat. */
+.chat-history { background: none; padding: 6px 12px; }
+.chat-history > row { padding: 3px 0; background: none; }
+.message-sender { font-weight: bold; font-size: smaller; margin: 0 8px 1px 8px; }
+.bubble { border-radius: 14px; padding: 6px 10px; margin: 0 2px; }
+.bubble.incoming { background-color: alpha(currentColor, 0.08); }
+.bubble.outgoing {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+.message.incoming { margin-right: 40px; }
+.message.outgoing { margin-left: 40px; }
+.bubble.outgoing .dim-label { color: inherit; opacity: 0.75; }
+.message-state { opacity: 0.6; }
+.message-state.read { opacity: 1; font-weight: 900; }
+.bubble.outgoing .message-state { color: inherit; }
+.undecryptable { font-style: italic; opacity: 0.7; }
+.bubble .quote {
+  border-left: 3px solid alpha(currentColor, 0.5);
+  padding-left: 6px; margin-bottom: 2px; opacity: 0.85;
+}
+.reactions { margin: 0 6px; }
+button.reaction { padding: 0 8px; min-height: 24px; border-radius: 999px; font-size: smaller; }
+.attachment-picture { border-radius: 8px; }
+.attachment { min-width: 200px; }
+
+/* The box to write in, with Send attached, as in Sanctum's Assist. */
+.composer > entry,
+.composer > button { min-height: 44px; }
+.composer > button.send { min-width: 44px; padding: 0; }
+.composer-button { min-width: 44px; min-height: 44px; }
+
+/* Calls. */
+.large-button { min-width: 56px; min-height: 56px; }
+.call-video { border-radius: 12px; background: black; }
+
+.fingerprint { font-family: monospace; }

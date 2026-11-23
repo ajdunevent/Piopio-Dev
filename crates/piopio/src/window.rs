@@ -17,15 +17,23 @@ use crate::chat::ChatPage;
 use crate::client::{self, run};
 use crate::dialogs;
 
-/// One row in the conversation list.
+/// One row in the conversation list: picture, name, when, the newest
+/// message and the unread count, as Dino shows them.
 struct Entry {
     account: String,
     proxy: ConversationProxy<'static>,
-    row: adw::ActionRow,
+    row: gtk::ListBoxRow,
+    name: gtk::Label,
+    time: gtk::Label,
+    preview: gtk::Label,
+    pin: gtk::Image,
+    mute: gtk::Image,
     badge: gtk::Label,
     avatar: adw::Avatar,
     last_activity: i64,
     pinned: bool,
+    /// The newest message's preview, shown again when typing stops.
+    preview_text: String,
 }
 
 /// What the window shows about an account.
@@ -48,13 +56,17 @@ pub struct Window {
     open: RefCell<Option<(String, Rc<ChatPage>)>>,
     /// Shown when no conversation is open.
     placeholder: adw::NavigationPage,
+    /// The Status button's dot.
+    status_dot: gtk::Box,
+    /// Whether any account is connected (the dot is grey otherwise).
+    online: std::cell::Cell<bool>,
 }
 
 impl Window {
     pub fn new(app: &adw::Application) -> Rc<Self> {
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
-            .css_classes(["navigation-sidebar"])
+            .css_classes(["navigation-sidebar", "conversation-list"])
             .build();
         list.set_sort_func(sort_rows);
 
@@ -96,21 +108,26 @@ impl Window {
         sidebar_stack.set_visible_child_name("loading");
 
         let menu = gtk::gio::Menu::new();
+        menu.append(Some("_Accounts"), Some("app.accounts"));
+        menu.append(Some("_About Piopio"), Some("app.about"));
+        let new = gtk::gio::Menu::new();
+        new.append(Some("_New Chat…"), Some("app.new-chat"));
+        new.append(Some("_Join Group Chat…"), Some("app.join-room"));
         let status = gtk::gio::Menu::new();
         status.append(Some("_Available"), Some("app.status::available"));
         status.append(Some("A_way"), Some("app.status::away"));
         status.append(Some("_Do Not Disturb"), Some("app.status::dnd"));
-        menu.append_section(None, &status);
-        menu.append(Some("_Join Group Chat…"), Some("app.join-room"));
-        menu.append(Some("_Accounts"), Some("app.accounts"));
-        menu.append(Some("Add _Account…"), Some("app.add-account"));
-        menu.append(Some("_About Piopio"), Some("app.about"));
+        let status_dot = gtk::Box::builder()
+            .css_classes(["status-dot"])
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build();
         let header = adw::HeaderBar::new();
         header.pack_start(
-            &gtk::Button::builder()
+            &gtk::MenuButton::builder()
                 .icon_name("list-add-symbolic")
-                .tooltip_text("New Chat")
-                .action_name("app.new-chat")
+                .tooltip_text("New")
+                .menu_model(&new)
                 .build(),
         );
         header.pack_end(
@@ -121,16 +138,29 @@ impl Window {
                 .primary(true)
                 .build(),
         );
+        header.pack_end(
+            &gtk::MenuButton::builder()
+                .child(&status_dot)
+                .tooltip_text("Status")
+                .css_classes(["flat", "image-button"])
+                .menu_model(&status)
+                .build(),
+        );
 
         let banner = adw::Banner::new("");
         banner.set_revealed(false);
 
-        let sidebar = adw::ToolbarView::new();
+        // Header bars stand out from the page throughout.
+        let sidebar = adw::ToolbarView::builder()
+            .top_bar_style(adw::ToolbarStyle::Raised)
+            .build();
         sidebar.add_top_bar(&header);
         sidebar.add_top_bar(&banner);
         sidebar.set_content(Some(&sidebar_stack));
 
-        let placeholder = adw::ToolbarView::new();
+        let placeholder = adw::ToolbarView::builder()
+            .top_bar_style(adw::ToolbarStyle::Raised)
+            .build();
         placeholder.add_top_bar(&adw::HeaderBar::builder().show_title(false).build());
         placeholder.set_content(Some(
             &adw::StatusPage::builder()
@@ -177,6 +207,32 @@ impl Window {
             accounts: RefCell::new(Vec::new()),
             open: RefCell::new(None),
             placeholder,
+            status_dot,
+            online: std::cell::Cell::new(false),
+        });
+
+        // The dot follows the chosen status, and turns grey while offline.
+        if let Some(action) = app
+            .lookup_action("status")
+            .and_then(|a| a.downcast::<gtk::gio::SimpleAction>().ok())
+        {
+            let weak = Rc::downgrade(&this);
+            action.connect_state_notify(move |_| {
+                if let Some(this) = weak.upgrade() {
+                    this.update_status_dot();
+                }
+            });
+        }
+        this.update_status_dot();
+        let weak = Rc::downgrade(&this);
+        crate::timefmt::on_change(move || {
+            if let Some(this) = weak.upgrade() {
+                for entry in this.entries.borrow().values() {
+                    entry
+                        .time
+                        .set_label(&crate::timefmt::short(entry.last_activity));
+                }
+            }
         });
 
         let weak = Rc::downgrade(&this);
@@ -194,6 +250,29 @@ impl Window {
             }
         });
         this
+    }
+
+    fn update_status_dot(&self) {
+        let show = self
+            .window
+            .application()
+            .and_then(|a| a.lookup_action("status"))
+            .and_then(|a| a.state())
+            .and_then(|s| s.get::<String>())
+            .unwrap_or_else(|| "available".into());
+        let (class, name) = if !self.online.get() {
+            ("offline", "Offline")
+        } else {
+            match show.as_str() {
+                "away" | "xa" => ("away", "Away"),
+                "dnd" => ("dnd", "Do Not Disturb"),
+                _ => ("available", "Available"),
+            }
+        };
+        self.status_dot.set_css_classes(&["status-dot", class]);
+        if let Some(button) = self.status_dot.parent() {
+            button.set_tooltip_text(Some(&format!("Status: {name}")));
+        }
     }
 
     pub fn toast(&self, text: &str) {
@@ -216,6 +295,23 @@ impl Window {
         };
         for path in paths {
             self.add_account_info(path).await;
+        }
+        // Start the Status menu where the accounts are.
+        let first = self.accounts.borrow().first().map(|a| a.proxy.clone());
+        if let Some(proxy) = first
+            && let Ok((show, _)) = run(async move { proxy.presence().await }).await
+            && let Some(action) = self
+                .window
+                .application()
+                .and_then(|a| a.lookup_action("status"))
+                .and_then(|a| a.downcast::<gtk::gio::SimpleAction>().ok())
+        {
+            let show = if show == "xa" {
+                "away".to_owned()
+            } else {
+                show
+            };
+            action.set_state(&show.to_variant());
         }
         self.watch_objects(bus.clone());
         self.load_conversations(&bus).await;
@@ -359,6 +455,7 @@ impl Window {
     async fn update_banner(&self) {
         let accounts: Vec<Rc<AccountInfo>> = self.accounts.borrow().clone();
         let mut problems = Vec::new();
+        let mut online = false;
         for account in accounts {
             let proxy = account.proxy.clone();
             let status = run(async move {
@@ -370,7 +467,7 @@ impl Window {
             .await;
             match status {
                 (false, _, _) => {}
-                (true, state, _) if state == "connected" => {}
+                (true, state, _) if state == "connected" => online = true,
                 (true, state, error) if state == "error" => {
                     problems.push(format!("{}: {error}", account.jid));
                 }
@@ -380,6 +477,8 @@ impl Window {
                 (true, _, _) => problems.push(format!("Connecting {}…", account.jid)),
             }
         }
+        self.online.set(online);
+        self.update_status_dot();
         if problems.is_empty() {
             self.banner.set_revealed(false);
         } else {
@@ -510,36 +609,95 @@ impl Window {
                 let unread = proxy.unread().await?;
                 let last = proxy.last_activity().await?;
                 let pinned = proxy.pinned().await?;
+                let muted = proxy.muted().await.unwrap_or_default();
+                let kind = proxy.kind().await.unwrap_or_default();
                 let newest = proxy.get_messages("", 1).await?.into_iter().next();
                 let picture = proxy.avatar().await.unwrap_or_default();
-                Ok::<_, zbus::Error>((proxy, title, unread, last, pinned, newest, picture))
+                Ok::<_, zbus::Error>((
+                    proxy, title, unread, last, pinned, muted, kind, newest, picture,
+                ))
             })
             .await
         };
-        let Ok((proxy, title, unread, last, pinned, newest, picture)) = loaded else {
+        let Ok((proxy, title, unread, last, pinned, muted, kind, newest, picture)) = loaded else {
             return;
         };
         if self.entries.borrow().contains_key(&key) {
             return;
         }
+        let room = kind == "room";
+
+        let avatar = adw::Avatar::new(40, Some(&title), true);
+        set_avatar_image(&avatar, &picture);
+        let name = gtk::Label::builder()
+            .label(&title)
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["name"])
+            .build();
+        let flag = |icon: &str, tip: &str| {
+            gtk::Image::builder()
+                .icon_name(icon)
+                .tooltip_text(tip)
+                .pixel_size(12)
+                .css_classes(["flag"])
+                .build()
+        };
+        let mute = flag("notifications-disabled-symbolic", "Muted");
+        mute.set_visible(muted == "always");
+        let pin = flag("view-pin-symbolic", "Pinned");
+        pin.set_visible(pinned);
+        let time = gtk::Label::builder()
+            .label(crate::timefmt::short(last))
+            .css_classes(["time", "dim-label"])
+            .build();
+        let top = gtk::Box::builder().spacing(6).build();
+        top.append(&name);
+        top.append(&mute);
+        top.append(&pin);
+        top.append(&time);
+
+        let preview_text = newest
+            .as_ref()
+            .map(|m| preview(m, room))
+            .unwrap_or_default();
+        let preview_label = gtk::Label::builder()
+            .label(&preview_text)
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .single_line_mode(true)
+            .css_classes(["preview"])
+            .build();
         let badge = gtk::Label::builder()
             .css_classes(["unread-badge"])
             .valign(gtk::Align::Center)
             .build();
-        let avatar = adw::Avatar::new(36, Some(&title), true);
-        set_avatar_image(&avatar, &picture);
-        let row = adw::ActionRow::builder()
-            .title(glib::markup_escape_text(&title).as_str())
-            .subtitle_lines(1)
+        let bottom = gtk::Box::builder().spacing(6).build();
+        bottom.append(&preview_label);
+        bottom.append(&badge);
+
+        let text = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .valign(gtk::Align::Center)
+            .hexpand(true)
+            .build();
+        text.append(&top);
+        text.append(&bottom);
+        let content = gtk::Box::builder()
+            .spacing(10)
+            .css_classes(["conversation-row"])
+            .build();
+        content.append(&avatar);
+        content.append(&text);
+        let row = gtk::ListBoxRow::builder()
+            .child(&content)
             .activatable(true)
             .name(key.as_str())
             .build();
-        row.add_prefix(&avatar);
-        row.add_suffix(&badge);
         set_unread(&badge, &row, unread);
-        if let Some(m) = &newest {
-            row.set_subtitle(&glib::markup_escape_text(&preview(m)));
-        }
         let account = key.split("/conversation/").next().unwrap_or("").to_owned();
         self.list.append(&row);
         self.entries.borrow_mut().insert(
@@ -548,18 +706,23 @@ impl Window {
                 account,
                 proxy: proxy.clone(),
                 row: row.clone(),
+                name,
+                time,
+                preview: preview_label,
+                pin,
+                mute,
                 badge,
                 avatar,
                 last_activity: last,
                 pinned,
+                preview_text,
             },
         );
-        row.set_widget_name(&key);
         store_sort_keys(&row, last, pinned);
         self.list.invalidate_sort();
         self.update_sidebar();
 
-        // Follow new messages, unread count and title.
+        // Follow new messages, unread count, title, picture and flags.
         let events = {
             let proxy = proxy.clone();
             client::forward(move || async move {
@@ -569,9 +732,17 @@ impl Window {
                 let last = proxy.receive_last_activity_changed().await;
                 let picture = proxy.receive_avatar_changed().await;
                 let pinned = proxy.receive_pinned_changed().await;
+                let muted = proxy.receive_muted_changed().await;
+                let typing = proxy.receive_peer_state_changed().await;
                 Some(futures_util::stream::select_all([
                     pinned
                         .filter_map(|c| async move { c.get().await.ok().map(RowEvent::Pinned) })
+                        .boxed(),
+                    muted
+                        .filter_map(|c| async move { c.get().await.ok().map(RowEvent::Muted) })
+                        .boxed(),
+                    typing
+                        .filter_map(|c| async move { c.get().await.ok().map(RowEvent::Typing) })
                         .boxed(),
                     picture
                         .filter_map(|c| async move { c.get().await.ok().map(RowEvent::Avatar) })
@@ -598,21 +769,30 @@ impl Window {
         glib::spawn_future_local(async move {
             while let Ok(event) = events.recv().await {
                 let Some(this) = weak.upgrade() else { break };
-                this.row_event(&key, event);
+                this.row_event(&key, event, room);
             }
         });
     }
 
-    fn row_event(&self, key: &str, event: RowEvent) {
+    fn row_event(&self, key: &str, event: RowEvent, room: bool) {
         let mut entries = self.entries.borrow_mut();
         let Some(entry) = entries.get_mut(key) else {
             return;
         };
         match event {
             RowEvent::Message(m) => {
-                entry
-                    .row
-                    .set_subtitle(&glib::markup_escape_text(&preview(&m)));
+                entry.preview_text = preview(&m, room);
+                entry.preview.set_label(&entry.preview_text);
+                entry.preview.remove_css_class("typing");
+            }
+            RowEvent::Typing(state) => {
+                if state == "composing" {
+                    entry.preview.set_label("typing…");
+                    entry.preview.add_css_class("typing");
+                } else {
+                    entry.preview.set_label(&entry.preview_text);
+                    entry.preview.remove_css_class("typing");
+                }
             }
             RowEvent::Unread(n) => {
                 let open = self.open.borrow().as_ref().is_some_and(|(k, _)| k == key);
@@ -626,18 +806,21 @@ impl Window {
                 set_unread(&entry.badge, &entry.row, n);
             }
             RowEvent::Title(t) => {
-                entry.row.set_title(&glib::markup_escape_text(&t));
+                entry.name.set_label(&t);
                 entry.avatar.set_text(Some(&t));
             }
             RowEvent::Avatar(path) => set_avatar_image(&entry.avatar, &path),
+            RowEvent::Muted(m) => entry.mute.set_visible(m == "always"),
             RowEvent::Pinned(p) => {
                 entry.pinned = p;
+                entry.pin.set_visible(p);
                 store_sort_keys(&entry.row, entry.last_activity, p);
                 drop(entries);
                 self.list.invalidate_sort();
             }
             RowEvent::Activity(t) => {
                 entry.last_activity = t;
+                entry.time.set_label(&crate::timefmt::short(t));
                 store_sort_keys(&entry.row, t, entry.pinned);
                 drop(entries);
                 self.list.invalidate_sort();
@@ -716,6 +899,8 @@ enum RowEvent {
     Activity(i64),
     Avatar(String),
     Pinned(bool),
+    Muted(String),
+    Typing(String),
 }
 
 /// Shows a picture file in an avatar (or the initials when there's none).
@@ -732,7 +917,7 @@ fn text(dict: &Dict, key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn preview(m: &Dict) -> String {
+fn preview(m: &Dict, room: bool) -> String {
     let body = if m
         .get("retracted")
         .and_then(|v| bool::try_from(v).ok())
@@ -749,14 +934,29 @@ fn preview(m: &Dict) -> String {
         .and_then(|v| bool::try_from(v).ok())
         .unwrap_or(false);
     let first_line = body.lines().next().unwrap_or("").to_owned();
+    let file = text(m, "file-name");
+    let first_line =
+        if !file.is_empty() && (first_line.is_empty() || first_line.starts_with("http")) {
+            file
+        } else {
+            first_line
+        };
     if outgoing {
-        format!("You: {first_line}")
+        format!("Me: {first_line}")
+    } else if room {
+        let sender = text(m, "sender");
+        let nick = sender.rsplit_once('/').map(|(_, n)| n).unwrap_or("");
+        if nick.is_empty() {
+            first_line
+        } else {
+            format!("{nick}: {first_line}")
+        }
     } else {
         first_line
     }
 }
 
-fn set_unread(badge: &gtk::Label, row: &adw::ActionRow, unread: u32) {
+fn set_unread(badge: &gtk::Label, row: &gtk::ListBoxRow, unread: u32) {
     badge.set_visible(unread > 0);
     badge.set_label(&unread.to_string());
     if unread > 0 {
@@ -768,7 +968,7 @@ fn set_unread(badge: &gtk::Label, row: &adw::ActionRow, unread: u32) {
 
 // Rows sort pinned first, then by last activity, newest first. The keys
 // live on the row itself so the sort function needs no window access.
-fn store_sort_keys(row: &adw::ActionRow, last_activity: i64, pinned: bool) {
+fn store_sort_keys(row: &gtk::ListBoxRow, last_activity: i64, pinned: bool) {
     unsafe {
         row.set_data("piopio-last", last_activity);
         row.set_data("piopio-pinned", pinned);

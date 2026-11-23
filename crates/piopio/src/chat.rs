@@ -1,7 +1,8 @@
 //! One open conversation: its history and the box to write in.
 //!
-//! The send button is always there, so sending works the same with an
-//! on-screen keyboard as with Enter. A message's menu (right click or long
+//! The send button is always there, attached to the box, so sending works
+//! the same with an on-screen keyboard as with Enter; it turns red with an
+//! open lock when messages would go out unencrypted. A message's menu (right click or long
 //! press) replies, reacts, edits or deletes; Up in an empty box edits the
 //! last message sent.
 
@@ -40,8 +41,17 @@ pub struct ChatPage {
     proxy: ConversationProxy<'static>,
     window: std::rc::Weak<Window>,
     own_jid: String,
-    lock: gtk::Button,
+    send: gtk::Button,
     title: adw::WindowTitle,
+    /// The account this conversation belongs to (its object path).
+    account: String,
+    /// Shown while the peer is blocked, with Unblock.
+    blocked_banner: adw::Banner,
+    composer: gtk::Widget,
+    /// The pictures and name beside each message.
+    peer_name: RefCell<String>,
+    peer_picture: RefCell<Option<gdk::Texture>>,
+    own_picture: RefCell<Option<gdk::Texture>>,
     /// Who is in a group chat, and leaving or rejoining it.
     people: gtk::MenuButton,
     is_room: Cell<bool>,
@@ -74,10 +84,6 @@ impl ChatPage {
         own_jid: String,
     ) -> Rc<Self> {
         let title = adw::WindowTitle::new("", "");
-        let lock = gtk::Button::builder()
-            .icon_name("channel-insecure-symbolic")
-            .tooltip_text("Not Encrypted")
-            .build();
         let people = gtk::MenuButton::builder()
             .icon_name("system-users-symbolic")
             .tooltip_text("People")
@@ -85,8 +91,7 @@ impl ChatPage {
             .build();
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         let menu = gtk::gio::Menu::new();
-        menu.append(Some("_Pin to Top"), Some("chat.pin"));
-        menu.append(Some("_Mute Notifications"), Some("chat.mute"));
+        menu.append(Some("Conversation _Details…"), Some("chat.details"));
         menu.append(Some("_Delete Conversation…"), Some("chat.delete"));
         let more = gtk::MenuButton::builder()
             .icon_name("view-more-symbolic")
@@ -99,7 +104,6 @@ impl ChatPage {
             .tooltip_text("Call")
             .build();
         header.pack_end(&call);
-        header.pack_end(&lock);
         header.pack_end(&people);
 
         let messages = gtk::ListBox::builder()
@@ -142,16 +146,23 @@ impl ChatPage {
 
         let entry = gtk::Entry::builder()
             .hexpand(true)
-            .placeholder_text("Unencrypted Message")
+            .placeholder_text("Message")
             .input_hints(gtk::InputHints::SPELLCHECK | gtk::InputHints::EMOJI)
             .build();
+        // Red with an open lock until the conversation is known to be
+        // encrypted.
         let send = gtk::Button::builder()
-            .icon_name("mail-send-symbolic")
-            .tooltip_text("Send")
-            .css_classes(["circular", "suggested-action"])
-            .valign(gtk::Align::Center)
-            .sensitive(false)
+            .icon_name("changes-allow-symbolic")
+            .tooltip_text("Send Unencrypted")
+            .css_classes(["destructive-action", "send"])
             .build();
+        let linked = gtk::Box::builder()
+            .hexpand(true)
+            .valign(gtk::Align::Center)
+            .css_classes(["linked", "composer"])
+            .build();
+        linked.append(&entry);
+        linked.append(&send);
         let row = gtk::Box::builder()
             .spacing(6)
             .margin_start(6)
@@ -162,12 +173,11 @@ impl ChatPage {
         let attach = gtk::Button::builder()
             .icon_name("mail-attachment-symbolic")
             .tooltip_text("Share a File")
-            .css_classes(["flat", "circular"])
+            .css_classes(["flat", "circular", "composer-button"])
             .valign(gtk::Align::Center)
             .build();
         row.append(&attach);
-        row.append(&entry);
-        row.append(&send);
+        row.append(&linked);
         let composer = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .build();
@@ -178,21 +188,41 @@ impl ChatPage {
             .child(&composer)
             .build();
 
-        let view = adw::ToolbarView::new();
+        let blocked_banner = adw::Banner::builder()
+            .title("You blocked this contact. Their messages don’t reach you.")
+            .button_label("_Unblock")
+            .build();
+        let view = adw::ToolbarView::builder()
+            .top_bar_style(adw::ToolbarStyle::Raised)
+            .build();
         view.add_top_bar(&header);
+        view.add_top_bar(&blocked_banner);
         view.set_content(Some(&scroller));
         view.add_bottom_bar(&composer);
         view.set_bottom_bar_style(adw::ToolbarStyle::Raised);
         let page = adw::NavigationPage::new(&view, "Chat");
 
         let me = own_jid.clone();
+        let account = proxy
+            .inner()
+            .path()
+            .as_str()
+            .rsplit_once("/conversation/")
+            .map(|(a, _)| a.to_owned())
+            .unwrap_or_default();
         let this = Rc::new(Self {
             page,
             proxy: proxy.clone(),
             window: Rc::downgrade(window),
             own_jid,
-            lock: lock.clone(),
+            send: send.clone(),
             title: title.clone(),
+            account,
+            blocked_banner: blocked_banner.clone(),
+            composer: composer.clone().upcast(),
+            peer_name: RefCell::default(),
+            peer_picture: RefCell::default(),
+            own_picture: RefCell::default(),
             people,
             is_room: Cell::new(false),
             me: RefCell::new(me),
@@ -211,10 +241,6 @@ impl ChatPage {
             at_start: Cell::new(false),
         });
 
-        entry.connect_changed({
-            let send = send.clone();
-            move |e| send.set_sensitive(!e.text().trim().is_empty())
-        });
         let weak = Rc::downgrade(&this);
         entry.connect_changed(move |e| {
             if let Some(this) = weak.upgrade() {
@@ -272,11 +298,9 @@ impl ChatPage {
         entry.add_controller(keys);
 
         let weak = Rc::downgrade(&this);
-        lock.connect_clicked(move |_| {
-            if let Some(this) = weak.upgrade()
-                && let Some(window) = this.window.upgrade()
-            {
-                crate::encryption::show(&window, this.proxy.clone(), this.own_jid.clone());
+        blocked_banner.connect_button_clicked(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.set_blocked(false);
             }
         });
 
@@ -319,6 +343,7 @@ impl ChatPage {
             .await
             {
                 title.set_title(&name);
+                *this.peer_name.borrow_mut() = name.clone();
                 let subtitle = if name == peer { "" } else { &peer };
                 title.set_subtitle(subtitle);
                 *this.subtitle.borrow_mut() = subtitle.to_owned();
@@ -328,16 +353,15 @@ impl ChatPage {
                     if let Some(b) = this.call_button.borrow().as_ref() {
                         b.set_visible(false);
                     }
-                    // The lock still shows whether the room is encrypted,
-                    // but there is no per-person dialog behind it.
-                    this.lock.set_sensitive(false);
                     this.setup_room().await;
                 }
             }
             this.follow_encryption();
             if !this.is_room.get() {
                 this.follow_typing();
+                this.follow_blocked();
             }
+            this.load_pictures().await;
             this.load_older().await;
             this.scroll_to_end();
             let proxy = this.proxy.clone();
@@ -598,33 +622,19 @@ impl ChatPage {
         }
     }
 
-    /// Pin, mute and delete, for the conversation menu.
+    /// Details and delete, for the conversation menu.
     fn install_actions(self: &Rc<Self>) {
         let group = gtk::gio::SimpleActionGroup::new();
-        let pin = gtk::gio::SimpleAction::new_stateful("pin", None, &false.to_variant());
-        let mute = gtk::gio::SimpleAction::new_stateful("mute", None, &false.to_variant());
+        let details = gtk::gio::SimpleAction::new("details", None);
         let delete = gtk::gio::SimpleAction::new("delete", None);
         {
-            let proxy = self.proxy.clone();
-            pin.connect_activate(move |a, _| {
-                let on = !a.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
-                a.set_state(&on.to_variant());
-                let proxy = proxy.clone();
-                glib::spawn_future_local(async move {
-                    let _ = run(async move { proxy.set_pinned(on).await }).await;
-                });
-            });
-        }
-        {
-            let proxy = self.proxy.clone();
-            mute.connect_activate(move |a, _| {
-                let on = !a.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
-                a.set_state(&on.to_variant());
-                let proxy = proxy.clone();
-                glib::spawn_future_local(async move {
-                    let value = if on { "always" } else { "never" };
-                    let _ = run(async move { proxy.set_muted(value).await }).await;
-                });
+            let weak = Rc::downgrade(self);
+            details.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade()
+                    && let Some(window) = this.window.upgrade()
+                {
+                    crate::details::show(&window, &this);
+                }
             });
         }
         {
@@ -635,25 +645,135 @@ impl ChatPage {
                 }
             });
         }
-        group.add_action(&pin);
-        group.add_action(&mute);
+        group.add_action(&details);
         group.add_action(&delete);
         self.page.insert_action_group("chat", Some(&group));
-        let proxy = self.proxy.clone();
+    }
+
+    pub fn proxy(&self) -> &ConversationProxy<'static> {
+        &self.proxy
+    }
+
+    pub fn own_jid(&self) -> &str {
+        &self.own_jid
+    }
+
+    pub fn account_path(&self) -> &str {
+        &self.account
+    }
+
+    /// Blocks or unblocks the peer, through the account.
+    pub fn set_blocked(self: &Rc<Self>, blocked: bool) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let Some(account) = window
+            .accounts
+            .borrow()
+            .iter()
+            .find(|a| a.path.as_str() == self.account)
+            .map(|a| a.proxy.clone())
+        else {
+            return;
+        };
+        let Ok(peer) = self.room_jid() else { return };
+        let w = Rc::downgrade(&window);
         glib::spawn_future_local(async move {
-            let state = run(async move {
-                (
-                    proxy.pinned().await.unwrap_or(false),
-                    proxy.muted().await.unwrap_or_default(),
-                )
+            let done = run(async move {
+                if blocked {
+                    account.block(&peer).await
+                } else {
+                    account.unblock(&peer).await
+                }
             })
             .await;
-            pin.set_state(&state.0.to_variant());
-            mute.set_state(&(state.1 == "always").to_variant());
+            if let Err(e) = done
+                && let Some(w) = w.upgrade()
+            {
+                w.toast(&client::explain(&e));
+            }
         });
     }
 
-    fn confirm_delete(self: &Rc<Self>) {
+    /// Shows the banner and turns off the box while the peer is blocked.
+    fn follow_blocked(self: &Rc<Self>) {
+        let changes = {
+            let proxy = self.proxy.clone();
+            client::forward(move || async move {
+                let first = proxy.blocked().await.unwrap_or(false);
+                let later = proxy.receive_blocked_changed().await;
+                Some(
+                    futures_util::stream::once(async move { first })
+                        .chain(later.filter_map(|c| async move { c.get().await.ok() })),
+                )
+            })
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(blocked) = changes.recv().await {
+                let Some(this) = weak.upgrade() else { break };
+                this.blocked_banner.set_revealed(blocked);
+                this.composer.set_sensitive(!blocked);
+            }
+        });
+    }
+
+    /// The pictures beside messages: the peer's and the account's own.
+    /// Messages are redrawn when either changes, or the peer's name.
+    async fn load_pictures(self: &Rc<Self>) {
+        let own = self.window.upgrade().and_then(|w| {
+            w.accounts
+                .borrow()
+                .iter()
+                .find(|a| a.path.as_str() == self.account)
+                .map(|a| a.proxy.clone())
+        });
+        let proxy = self.proxy.clone();
+        let (peer, mine) = run(async move {
+            let peer = proxy.avatar().await.unwrap_or_default();
+            let mine = match own {
+                Some(own) => own.avatar().await.unwrap_or_default(),
+                None => String::new(),
+            };
+            (peer, mine)
+        })
+        .await;
+        *self.peer_picture.borrow_mut() = texture(&peer);
+        *self.own_picture.borrow_mut() = texture(&mine);
+
+        let changes = {
+            let proxy = self.proxy.clone();
+            client::forward(move || async move {
+                let picture = proxy.receive_avatar_changed().await;
+                let title = proxy.receive_title_changed().await;
+                Some(futures_util::stream::select(
+                    picture.filter_map(|c| async move { c.get().await.ok().map(|p| (true, p)) }),
+                    title.filter_map(|c| async move { c.get().await.ok().map(|t| (false, t)) }),
+                ))
+            })
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok((is_picture, value)) = changes.recv().await {
+                let Some(this) = weak.upgrade() else { break };
+                if is_picture {
+                    *this.peer_picture.borrow_mut() = texture(&value);
+                } else {
+                    *this.peer_name.borrow_mut() = value;
+                }
+                this.redraw_all();
+            }
+        });
+    }
+
+    fn redraw_all(self: &Rc<Self>) {
+        let rows: Vec<(gtk::ListBoxRow, Dict)> = self.rows.borrow().values().cloned().collect();
+        for (row, m) in rows {
+            row.set_child(Some(&self.message(&m)));
+        }
+    }
+
+    pub fn confirm_delete(self: &Rc<Self>) {
         let Some(window) = self.window.upgrade() else {
             return;
         };
@@ -740,7 +860,8 @@ impl ChatPage {
         });
     }
 
-    /// Keeps the lock and the composer's hint in step with Encryption.
+    /// Keeps the send button and the composer's hint in step with
+    /// Encryption.
     fn follow_encryption(self: &Rc<Self>) {
         let changes = {
             let proxy = self.proxy.clone();
@@ -758,16 +879,15 @@ impl ChatPage {
             while let Ok(encryption) = changes.recv().await {
                 let Some(this) = weak.upgrade() else { break };
                 let encrypted = encryption == "omemo" || encryption == "omemo2";
-                this.lock.set_icon_name(if encrypted {
-                    "channel-secure-symbolic"
+                if encrypted {
+                    this.send.set_icon_name("paper-plane-symbolic");
+                    this.send.set_tooltip_text(Some("Send Encrypted"));
+                    this.send.set_css_classes(&["suggested-action", "send"]);
                 } else {
-                    "channel-insecure-symbolic"
-                });
-                this.lock.set_tooltip_text(Some(if encrypted {
-                    "Encrypted"
-                } else {
-                    "Not Encrypted"
-                }));
+                    this.send.set_icon_name("changes-allow-symbolic");
+                    this.send.set_tooltip_text(Some("Send Unencrypted"));
+                    this.send.set_css_classes(&["destructive-action", "send"]);
+                }
                 this.entry.set_placeholder_text(Some(if encrypted {
                     "Encrypted Message"
                 } else {
@@ -818,7 +938,7 @@ impl ChatPage {
             .activatable(false)
             .selectable(false)
             .build();
-        row.set_child(Some(&self.bubble(m)));
+        row.set_child(Some(&self.message(m)));
         self.rows
             .borrow_mut()
             .insert(text(m, "id"), (row.clone(), m.clone()));
@@ -832,8 +952,66 @@ impl ChatPage {
         for (k, v) in changes {
             m.insert(k, v);
         }
-        row.set_child(Some(&self.bubble(&m)));
+        row.set_child(Some(&self.message(&m)));
         self.rows.borrow_mut().insert(id.to_owned(), (row, m));
+    }
+
+    /// A message with the sender's picture and name beside it: on the left
+    /// for others, on the right for us.
+    fn message(self: &Rc<Self>, m: &Dict) -> gtk::Widget {
+        let outgoing = flag(m, "outgoing");
+        let sender = text(m, "sender");
+        let (name, picture) = if outgoing {
+            ("Me".to_owned(), self.own_picture.borrow().clone())
+        } else if self.is_room.get() {
+            let nick = sender
+                .split_once('/')
+                .map(|(_, n)| n.to_owned())
+                .unwrap_or(sender);
+            (nick, None)
+        } else {
+            (
+                self.peer_name.borrow().clone(),
+                self.peer_picture.borrow().clone(),
+            )
+        };
+        // Our own initials come from our address, not from "Me".
+        let initials_from = if outgoing {
+            self.own_jid.clone()
+        } else {
+            name.clone()
+        };
+        let avatar = adw::Avatar::new(32, Some(&initials_from), true);
+        avatar.set_custom_image(picture.as_ref());
+        avatar.set_valign(gtk::Align::Start);
+        avatar.set_margin_top(16);
+        let label = gtk::Label::builder()
+            .label(&name)
+            .xalign(if outgoing { 1.0 } else { 0.0 })
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["message-sender"])
+            .build();
+        let column = self.bubble(m);
+        if let Some(column) = column.downcast_ref::<gtk::Box>() {
+            column.prepend(&label);
+        }
+        let line = gtk::Box::builder()
+            .spacing(6)
+            .halign(if outgoing {
+                gtk::Align::End
+            } else {
+                gtk::Align::Start
+            })
+            .css_classes(["message", if outgoing { "outgoing" } else { "incoming" }])
+            .build();
+        if outgoing {
+            line.append(&column);
+            line.append(&avatar);
+        } else {
+            line.append(&avatar);
+            line.append(&column);
+        }
+        line.upcast()
     }
 
     fn bubble(self: &Rc<Self>, m: &Dict) -> gtk::Widget {
@@ -848,18 +1026,6 @@ impl ChatPage {
             .spacing(2)
             .css_classes(["bubble", if outgoing { "outgoing" } else { "incoming" }])
             .build();
-
-        if self.is_room.get() && !outgoing {
-            let sender = text(m, "sender");
-            let nick = sender.split_once('/').map(|(_, n)| n).unwrap_or(&sender);
-            bubble.append(
-                &gtk::Label::builder()
-                    .label(nick)
-                    .xalign(0.0)
-                    .css_classes(["sender"])
-                    .build(),
-            );
-        }
 
         let preview = text(m, "reply-preview");
         if !text(m, "reply-to").is_empty() && !retracted {
@@ -949,13 +1115,15 @@ impl ChatPage {
         );
         if outgoing {
             let state = text(m, "state");
-            meta.append(
-                &gtk::Label::builder()
-                    .label(tick(&state))
-                    .tooltip_text(state_name(&state))
-                    .css_classes(["caption", "message-state"])
-                    .build(),
-            );
+            let tick = gtk::Label::builder()
+                .label(tick(&state))
+                .tooltip_text(state_name(&state))
+                .css_classes(["caption", "message-state"])
+                .build();
+            if state == "displayed" {
+                tick.add_css_class("read");
+            }
+            meta.append(&tick);
         }
         bubble.append(&meta);
 
@@ -1474,22 +1642,14 @@ fn time_of(m: &Dict) -> String {
         .get("timestamp")
         .and_then(|v| i64::try_from(v).ok())
         .unwrap_or(0);
-    let Ok(when) = glib::DateTime::from_unix_local(ms / 1000) else {
-        return String::new();
-    };
-    let Ok(now) = glib::DateTime::now_local() else {
-        return String::new();
-    };
-    let format = if when.ymd() == now.ymd() {
-        "%H:%M"
-    } else if when.year() == now.year() {
-        "%e %b %H:%M"
-    } else {
-        "%e %b %Y"
-    };
-    when.format(format)
-        .map(|s| s.to_string())
-        .unwrap_or_default()
+    crate::timefmt::message(ms)
+}
+
+/// A picture file as a texture for an avatar, or None.
+fn texture(path: &str) -> Option<gdk::Texture> {
+    (!path.is_empty())
+        .then(|| gdk::Texture::from_filename(path).ok())
+        .flatten()
 }
 
 fn tick(state: &str) -> &'static str {

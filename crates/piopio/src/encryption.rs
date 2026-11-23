@@ -1,5 +1,6 @@
 //! The conversation's encryption settings: whether to encrypt, our own
-//! fingerprint, and the contact's devices with their trust.
+//! fingerprint, and the contact's devices with their trust. A page of
+//! Conversation Details.
 
 use std::rc::Rc;
 
@@ -46,12 +47,19 @@ fn fingerprint_markup(fingerprint: &str) -> String {
     .to_string()
 }
 
-pub fn show(window: &Rc<Window>, conversation: ConversationProxy<'static>, own_jid: String) {
-    let dialog = adw::PreferencesDialog::builder()
-        .title("Encryption")
-        .build();
+/// The page, filled in as the devices load.
+pub fn page(
+    window: &Rc<Window>,
+    conversation: ConversationProxy<'static>,
+    own_jid: String,
+) -> adw::NavigationPage {
     let page = adw::PreferencesPage::new();
-    dialog.add(&page);
+    let view = adw::ToolbarView::builder()
+        .top_bar_style(adw::ToolbarStyle::Raised)
+        .content(&page)
+        .build();
+    view.add_top_bar(&adw::HeaderBar::new());
+    let navigation = adw::NavigationPage::new(&view, "Encryption");
 
     let settings = adw::PreferencesGroup::new();
     let wanted = adw::SwitchRow::builder().title("Encrypt Messages").build();
@@ -75,7 +83,6 @@ pub fn show(window: &Rc<Window>, conversation: ConversationProxy<'static>, own_j
 
     let path = account_path(conversation.inner().path().as_str());
     let weak = Rc::downgrade(window);
-    let window_dialog = dialog.clone();
     glib::spawn_future_local(async move {
         let Ok(bus) = client::bus().await else { return };
         let conv = conversation.clone();
@@ -98,7 +105,6 @@ pub fn show(window: &Rc<Window>, conversation: ConversationProxy<'static>, own_j
                 if let Some(w) = weak.upgrade() {
                     w.toast(&client::explain(&e));
                 }
-                window_dialog.close();
                 return;
             }
         };
@@ -127,7 +133,7 @@ pub fn show(window: &Rc<Window>, conversation: ConversationProxy<'static>, own_j
         fill(&theirs, &omemo, &peer).await;
         fill(&mine, &omemo, &own_jid).await;
     });
-    dialog.present(Some(&window.window));
+    navigation
 }
 
 /// Adds a row per device of `jid` to `group`, with a switch for trust.

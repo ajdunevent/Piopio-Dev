@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Compiled into the UI by crates/piopio/build.rs. libadwaita loads
+     style.css and the icons from the application's base path itself. -->
+<gresources>
+  <gresource prefix="/net/dunevent/Piopio">
+    <file>style.css</file>
+    <file>icons/scalable/actions/paper-plane-symbolic.svg</file>
+  </gresource>
+</gresources>

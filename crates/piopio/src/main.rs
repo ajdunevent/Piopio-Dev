@@ -6,9 +6,11 @@
 mod calls;
 mod chat;
 mod client;
+mod details;
 mod dialogs;
 mod encryption;
 mod styling;
+mod timefmt;
 mod window;
 
 /// A loading spinner: libadwaita's on GNOME 51, GTK's on older systems.
@@ -26,62 +28,16 @@ use std::rc::Rc;
 use adw::prelude::*;
 use piopio_dbus::APP_ID;
 
-const CSS: &str = r#"
-.chat-history { background: none; padding: 6px 12px; }
-.chat-history > row { padding: 2px 0; background: none; }
-.bubble { border-radius: 14px; padding: 6px 10px; margin: 0 6px; }
-.bubble.incoming { background-color: alpha(currentColor, 0.08); margin-right: 48px; }
-.bubble.outgoing {
-  background-color: @accent_bg_color;
-  color: @accent_fg_color;
-  margin-left: 48px;
-}
-.bubble.outgoing .dim-label, .bubble.outgoing .message-state { color: inherit; opacity: 0.75; }
-.unread-badge {
-  background-color: @accent_bg_color;
-  color: @accent_fg_color;
-  border-radius: 999px; padding: 0 7px; min-width: 10px;
-  font-size: smaller; font-weight: bold;
-}
-row.unread .title { font-weight: bold; }
-.bubble .sender { font-weight: bold; font-size: smaller; }
-.undecryptable { font-style: italic; opacity: 0.7; }
-.bubble .quote {
-  border-left: 3px solid alpha(currentColor, 0.5);
-  padding-left: 6px; margin-bottom: 2px; opacity: 0.85;
-}
-.reactions { margin: 0 6px; }
-.attachment-picture { border-radius: 8px; }
-.large-button { min-width: 56px; min-height: 56px; }
-.attachment { min-width: 200px; }
-button.reaction { padding: 0 8px; min-height: 24px; border-radius: 999px; font-size: smaller; }
-.fingerprint { font-family: monospace; }
-"#;
-
 fn main() -> glib::ExitCode {
     // The D-Bus runtime starts before GTK so its thread is ready for the first call.
     let _ = client::runtime();
+    // Styles and icons; libadwaita loads style.css from here by itself.
+    gio::resources_register_include!("piopio.gresource").expect("the UI's resources");
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::HANDLES_OPEN)
         .build();
     let window: Rc<RefCell<Option<Rc<window::Window>>>> = Rc::default();
-
-    app.connect_startup(|_| {
-        let provider = gtk::CssProvider::new();
-        #[cfg(feature = "gnome-51")]
-        provider.load_from_string(CSS);
-        #[cfg(not(feature = "gnome-51"))]
-        #[allow(deprecated)]
-        provider.load_from_data(CSS);
-        if let Some(display) = gdk::Display::default() {
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
-    });
 
     // Every entry point creates the window first if it doesn't exist yet,
     // including actions invoked by a notification while no window is open.
@@ -100,6 +56,8 @@ fn main() -> glib::ExitCode {
             w
         }
     };
+
+    app.connect_startup(|_| crate::timefmt::init());
 
     app.connect_activate({
         let ensure = ensure.clone();
@@ -260,4 +218,4 @@ fn open_address(w: &Rc<window::Window>, jid: String) {
     });
 }
 
-use adw::{gdk, gio, glib, gtk};
+use adw::{gio, glib, gtk};

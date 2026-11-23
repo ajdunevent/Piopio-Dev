@@ -74,11 +74,17 @@ impl Conversations {
         if let Some(found) = self.by_peer.lock().await.get(peer.as_str()) {
             return Ok(found.clone());
         }
-        let (row, _) = session
+        let (row, created) = session
             .store
             .conversation(session.account_id, peer.to_string(), kind)
             .await?;
-        self.export(session, row).await
+        let found = self.export(session, row).await?;
+        // Someone new wrote: their picture, which no notification brings
+        // unless they're a contact.
+        if created && kind == "chat" {
+            crate::avatars::refresh(session, peer.clone());
+        }
+        Ok(found)
     }
 
     async fn export(

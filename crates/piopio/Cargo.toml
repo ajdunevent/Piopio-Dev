@@ -22,3 +22,6 @@ zbus = { version = "5.13.2", default-features = false, features = ["tokio"] }
 # development on distributions that do not ship GNOME 51 yet.
 default = ["gnome-51"]
 gnome-51 = ["adw/v1_10", "adw/gtk_v4_24"]
+
+[build-dependencies]
+glib-build-tools = "0.22"

@@ -21,7 +21,8 @@ difference, and OMEMO is on from the first message.
   SQLCipher database whose key is kept in the keyring (the Secret portal
   inside Flatpak), and reconnect when the daemon starts.
 - **Contacts:** roster with versioning, presence, adding and renaming
-  contacts, accepting or declining contact requests.
+  contacts, accepting or declining contact requests, blocking (XEP-0191,
+  shared with your other devices).
 - **One-to-one chat:** sending and receiving, delivery receipts and read
   markers, typing notifications, Carbons for your other devices, and
   catch-up from the server archive (MAM) after being offline; duplicates are
@@ -45,7 +46,11 @@ difference, and OMEMO is on from the first message.
 - **Files:** sharing through the server's upload service, encrypted
   (`aesgcm://`) in OMEMO chats; pictures download by themselves and get
   thumbnails made by the daemon.
-- **Avatars:** contacts' pictures, and setting your own in Accounts.
+- **Avatars:** contacts' pictures (PEP, or vCard for those who only
+  publish one there), and setting your own in Accounts.
+- **Conversation Details:** the contact, encryption and devices, pinning,
+  muting, and typing notifications and read receipts per conversation
+  (overriding the account's defaults), Block and Delete.
 - **Calls:** voice and video calls with anyone whose client speaks Jingle
   RTP (XEP-0167) with ICE and DTLS-SRTP, rung through Jingle Message
   Initiation (XEP-0353) so every device rings. The daemon does the
@@ -55,9 +60,12 @@ difference, and OMEMO is on from the first message.
   for autostart inside Flatpak, and shows notifications through the
   Notification portal while no window is open (in group chats only when
   you're mentioned). Clicking one opens the chat.
-- **Window:** conversation list, chat with an always-visible Send button,
-  delivery ticks, Add Account, New Chat, Join Group Chat, Accounts; adapts
-  down to 360px.
+- **Window:** a conversation list after Dino's (pictures, times that follow
+  the desktop's 12/24-hour setting, pinned and muted marks, typing),
+  pictures and names beside messages, a Send button attached to the box
+  that turns red with an open lock when a message would go unencrypted,
+  delivery ticks, a Status menu, and New Chat and Join Group Chat under +;
+  adapts down to 360px.
 
 Not yet: OMEMO 2 in group chats, Jingle file transfer, group calls,
 Client State Indication (blocked on tokio-xmpp sending nonzas), direct TLS

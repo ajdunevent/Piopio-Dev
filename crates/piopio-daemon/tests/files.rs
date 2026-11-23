@@ -217,3 +217,37 @@ async fn avatar_changed_while_offline() {
     })
     .await;
 }
+
+/// Someone new writes: their picture shows on the conversation that
+/// their message creates.
+#[tokio::test]
+async fn avatar_of_someone_new() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    let leo = TestDaemon::start().await.unwrap();
+    let mia = TestDaemon::start().await.unwrap();
+    let (_, leo_account) = leo.add_local("leo").await;
+    let (mia_path, _) = mia.add_local("mia").await;
+    leo_account
+        .set_avatar(zbus::zvariant::Fd::from(&picture()))
+        .await
+        .unwrap();
+    let chat = leo
+        .conversation(leo_account.start_chat("mia@localhost").await.unwrap())
+        .await;
+    chat.send("Hello from someone new", HashMap::new())
+        .await
+        .unwrap();
+    let theirs = wait_for(20, "the conversation Leo's message creates", || async {
+        mia.conversation_with(&mia_path, "leo@localhost").await
+    })
+    .await;
+    let theirs = mia.conversation(theirs).await;
+    wait_for(20, "Leo's picture", || async {
+        let p = theirs.avatar().await.unwrap();
+        (!p.is_empty()).then_some(())
+    })
+    .await;
+}
