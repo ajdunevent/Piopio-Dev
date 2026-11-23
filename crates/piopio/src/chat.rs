@@ -742,8 +742,14 @@ impl ChatPage {
         }
         // A file's message is only its link: don't show that too.
         if !(has_file && (body_text.is_empty() || body_text == text(m, "file-url"))) {
+            let (label, use_markup) = if dimmed {
+                (body_text, false)
+            } else {
+                (crate::styling::markup(&body_text), true)
+            };
             let body = gtk::Label::builder()
-                .label(body_text)
+                .label(label)
+                .use_markup(use_markup)
                 .wrap(true)
                 .wrap_mode(gtk::pango::WrapMode::WordChar)
                 .selectable(!dimmed)

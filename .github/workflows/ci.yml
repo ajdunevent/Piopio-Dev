@@ -56,7 +56,7 @@ jobs:
   # runtime has, so it is checked by building the real Flatpak. Lints for the
   # UI run here against the runner's older GTK with the fallback feature set.
   ui-lint:
-    name: UI (clippy, older GTK)
+    name: UI (clippy, tests, older GTK)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -65,7 +65,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libadwaita-1-dev libgtk-4-dev
-      - run: cargo clippy --locked -p piopio --no-default-features -- -D warnings
+      - run: cargo clippy --locked -p piopio --no-default-features --all-targets -- -D warnings
+      - run: cargo test --locked -p piopio --no-default-features
 
   flatpak:
     name: Flatpak (GNOME 51)

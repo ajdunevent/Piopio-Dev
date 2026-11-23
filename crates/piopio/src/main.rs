@@ -7,6 +7,7 @@ mod chat;
 mod client;
 mod dialogs;
 mod encryption;
+mod styling;
 mod window;
 
 /// A loading spinner: libadwaita's on GNOME 51, GTK's on older systems.
