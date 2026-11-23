@@ -69,6 +69,24 @@ jobs:
       - run: cargo clippy --locked -p piopio --no-default-features --all-targets -- -D warnings
       - run: cargo test --locked -p piopio --no-default-features
 
+  # Call media: two WebRTC peers in one process, over loopback.
+  calls:
+    name: Calls (GStreamer WebRTC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-bad1.0-dev \
+            libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-bad gstreamer1.0-nice \
+            gstreamer1.0-plugins-good gstreamer1.0-plugins-base
+      - run: cargo clippy --locked -p piopio-call --all-targets -- -D warnings
+      - run: cargo test --locked -p piopio-call
+
   flatpak:
     name: Flatpak (GNOME 51)
     runs-on: ubuntu-latest
@@ -92,6 +110,14 @@ jobs:
           bundle: piopio.flatpak
           manifest-path: build-aux/net.dunevent.Piopio.Devel.yml
           cache-key: flatpak-builder-${{ github.sha }}
+      # Which call elements the GNOME runtime has (information for now).
+      - name: GStreamer WebRTC in the runtime
+        continue-on-error: true
+        run: |
+          for e in webrtcbin nicesrc dtlssrtpenc srtpenc opusenc rtpopuspay vp8enc gtk4paintablesink; do
+            flatpak run --command=gst-inspect-1.0 org.gnome.Platform//51 $e > /dev/null 2>&1 \
+              && echo "$e: yes" || echo "$e: MISSING"
+          done
 
   # Logs in to the test account on a real server. Skipped until the repository
   # has the PIOPIO_TEST_JID and PIOPIO_TEST_PASSWORD Actions secrets.
