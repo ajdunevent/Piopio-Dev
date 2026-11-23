@@ -2,6 +2,7 @@
 //! disconnects and reconnects it as the user asks.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio_xmpp::jid::BareJid;
@@ -105,6 +106,60 @@ impl AccountObject {
             session::send_presence(&self.session).await;
         }
         Ok(())
+    }
+
+    /// Whether contacts see that we're typing, unless a conversation says
+    /// otherwise. Writable.
+    #[zbus(property)]
+    fn send_chat_states(&self) -> bool {
+        self.session.send_chat_states.load(Ordering::SeqCst)
+    }
+
+    #[zbus(property)]
+    async fn set_send_chat_states(&mut self, on: bool) {
+        self.session.send_chat_states.store(on, Ordering::SeqCst);
+        self.save_privacy().await;
+        self.session
+            .conversations
+            .privacy_changed(&self.session)
+            .await;
+    }
+
+    /// Whether contacts see that we've read their messages, unless a
+    /// conversation says otherwise. Writable.
+    #[zbus(property)]
+    fn send_receipts(&self) -> bool {
+        self.session.send_receipts.load(Ordering::SeqCst)
+    }
+
+    #[zbus(property)]
+    async fn set_send_receipts(&mut self, on: bool) {
+        self.session.send_receipts.store(on, Ordering::SeqCst);
+        self.save_privacy().await;
+        self.session
+            .conversations
+            .privacy_changed(&self.session)
+            .await;
+    }
+
+    /// Blocks `jid` (XEP-0191): the server drops their messages and hides
+    /// our presence from them, on every device.
+    async fn block(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        jid: &str,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        self.set_blocked(jid, true).await
+    }
+
+    async fn unblock(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        jid: &str,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        self.set_blocked(jid, false).await
     }
 
     #[zbus(property)]
@@ -299,6 +354,32 @@ pub async fn set_state(iface: &InterfaceRef<AccountObject>, state: State, error:
     }
 }
 
+impl AccountObject {
+    async fn save_privacy(&self) {
+        let _ = self
+            .session
+            .store
+            .set_account_privacy(
+                self.session.account_id,
+                self.session.send_chat_states.load(Ordering::SeqCst),
+                self.session.send_receipts.load(Ordering::SeqCst),
+            )
+            .await;
+    }
+
+    async fn set_blocked(&self, jid: &str, blocked: bool) -> zbus::fdo::Result<()> {
+        let jid: BareJid = jid
+            .parse()
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("not a valid JID: {e}")))?;
+        if !self.session.is_online() {
+            return Err(zbus::fdo::Error::Failed("the account is offline".into()));
+        }
+        crate::blocking::set(&self.session, &jid, blocked)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("the server refused: {e}")))
+    }
+}
+
 /// The daemon's handle on an account.
 pub struct Account {
     pub id: i64,
@@ -320,6 +401,12 @@ impl Account {
         let path =
             OwnedObjectPath::try_from(format!("{}/{}", piopio_dbus::ACCOUNT_PATH_PREFIX, row.id))?;
         let session = session::new_shared(row.id, jid, path.clone(), store, bus.clone());
+        session
+            .send_chat_states
+            .store(row.send_chat_states, std::sync::atomic::Ordering::SeqCst);
+        session
+            .send_receipts
+            .store(row.send_receipts, std::sync::atomic::Ordering::SeqCst);
 
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let object = AccountObject {

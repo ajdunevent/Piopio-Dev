@@ -81,6 +81,11 @@ pub struct Shared {
     pub rooms: crate::rooms::Rooms,
     pub uploads: crate::files::Uploads,
     pub calls: crate::jingle::Calls,
+    pub blocked: crate::blocking::Blocklist,
+    /// The account's defaults: whether contacts see that we're typing, and
+    /// that we've read their messages.
+    pub send_chat_states: AtomicBool,
+    pub send_receipts: AtomicBool,
 }
 
 /// Handle used by everything outside the session task.
@@ -152,6 +157,9 @@ pub fn new_shared(
         rooms: crate::rooms::Rooms::default(),
         uploads: crate::files::Uploads::default(),
         calls: crate::jingle::Calls::default(),
+        blocked: crate::blocking::Blocklist::default(),
+        send_chat_states: AtomicBool::new(true),
+        send_receipts: AtomicBool::new(true),
     })
 }
 
@@ -335,6 +343,7 @@ async fn came_online(shared: Session, features: StreamFeatures) {
     send_presence(&shared).await;
     let _ = features;
     shared.uploads.forget().await;
+    crate::blocking::online(&shared).await;
     crate::omemo::online(&shared).await;
     crate::rooms::online(&shared).await;
     messages::catch_up(&shared).await;
@@ -371,6 +380,12 @@ async fn handle_stanza(shared: &Session, stanza: Stanza) {
                 result(from, id)
             } else if let Some(reply) = crate::disco::answer(shared, &from, &id, &payload) {
                 reply
+            } else if payload.ns() == crate::blocking::NS {
+                if shared.is_own(from.as_ref()) && crate::blocking::push(shared, &payload).await {
+                    result(from, id)
+                } else {
+                    error(from, id, DefinedCondition::Forbidden)
+                }
             } else {
                 error(from, id, DefinedCondition::ServiceUnavailable)
             };

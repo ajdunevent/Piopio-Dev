@@ -8,6 +8,7 @@ mod account;
 mod activity;
 mod avatars;
 mod background;
+mod blocking;
 mod connect;
 mod daemon;
 mod disco;

@@ -154,6 +154,14 @@ const SCHEMA: &[&str] = &[
         PRIMARY KEY (account_id, jid, device_id)
     );
     "#,
+    // Version 8: typing notifications and read receipts, on or off per
+    // account, and per conversation "default", "on" or "off".
+    r#"
+    ALTER TABLE accounts ADD COLUMN send_chat_states INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE accounts ADD COLUMN send_receipts INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE conversations ADD COLUMN send_chat_states TEXT NOT NULL DEFAULT 'default';
+    ALTER TABLE conversations ADD COLUMN send_receipts TEXT NOT NULL DEFAULT 'default';
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -176,6 +184,10 @@ pub struct AccountRow {
     pub mam_last_id: Option<String>,
     /// Connection options as JSON (see `connect::Server`).
     pub options: String,
+    /// Whether contacts see that we're typing, and that we've read their
+    /// messages, unless a conversation says otherwise.
+    pub send_chat_states: bool,
+    pub send_receipts: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,6 +211,9 @@ pub struct ConversationRow {
     pub unread: u32,
     pub last_activity: i64,
     pub encryption_wanted: bool,
+    /// "default" (the account's setting), "on" or "off".
+    pub send_chat_states: String,
+    pub send_receipts: String,
 }
 
 #[derive(Clone, Debug)]
@@ -302,10 +317,28 @@ impl Store {
 
     // Accounts
 
+    /// Sets an account's defaults for typing notifications and read receipts.
+    pub async fn set_account_privacy(
+        &self,
+        account: i64,
+        send_chat_states: bool,
+        send_receipts: bool,
+    ) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "UPDATE accounts SET send_chat_states = ?2, send_receipts = ?3 WHERE id = ?1",
+                params![account, send_chat_states, send_receipts],
+            )
+            .map(drop)
+        })
+        .await
+    }
+
     pub async fn accounts(&self) -> anyhow::Result<Vec<AccountRow>> {
         self.with(|db| {
             let mut q = db.prepare(
-                "SELECT id, jid, password, enabled, roster_ver, NULLIF(mam_last_id, ''), options
+                "SELECT id, jid, password, enabled, roster_ver, NULLIF(mam_last_id, ''), options,
+                        send_chat_states, send_receipts
                  FROM accounts ORDER BY id",
             )?;
             q.query_map([], |r| {
@@ -317,6 +350,8 @@ impl Store {
                     roster_ver: r.get(4)?,
                     mam_last_id: r.get(5)?,
                     options: r.get(6)?,
+                    send_chat_states: r.get(7)?,
+                    send_receipts: r.get(8)?,
                 })
             })?
             .collect()
@@ -485,14 +520,16 @@ impl Store {
         self.with(move |db| {
             db.execute(
                 "UPDATE conversations SET pinned = ?2, muted = ?3, unread = ?4, last_activity = ?5,
-                 encryption_wanted = ?6 WHERE id = ?1",
+                 encryption_wanted = ?6, send_chat_states = ?7, send_receipts = ?8 WHERE id = ?1",
                 params![
                     row.id,
                     row.pinned,
                     row.muted,
                     row.unread,
                     row.last_activity,
-                    row.encryption_wanted
+                    row.encryption_wanted,
+                    row.send_chat_states,
+                    row.send_receipts
                 ],
             )
             .map(drop)
@@ -1159,8 +1196,8 @@ fn rank(state: &str) -> u8 {
     }
 }
 
-const CONVERSATION_COLUMNS: &str =
-    "id, account_id, peer, kind, pinned, muted, unread, last_activity, encryption_wanted";
+const CONVERSATION_COLUMNS: &str = "id, account_id, peer, kind, pinned, muted, unread, last_activity, encryption_wanted, \
+     send_chat_states, send_receipts";
 const MESSAGE_COLUMNS: &str = "id, origin_id, server_id, outgoing, sender, body, timestamp, state, \
      encryption, edited, retracted, reply_to, reply_to_sender, reply_preview";
 
@@ -1206,6 +1243,8 @@ fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         unread: r.get(6)?,
         last_activity: r.get(7)?,
         encryption_wanted: r.get(8)?,
+        send_chat_states: r.get(9)?,
+        send_receipts: r.get(10)?,
     })
 }
 

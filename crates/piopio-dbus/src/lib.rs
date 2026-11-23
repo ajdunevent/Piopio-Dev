@@ -131,6 +131,22 @@ pub trait Account {
     /// The account's own picture (a small PNG file), or "".
     #[zbus(property)]
     fn avatar(&self) -> zbus::Result<String>;
+
+    /// Default for conversations: tell contacts when we're typing.
+    #[zbus(property)]
+    fn send_chat_states(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_send_chat_states(&self, on: bool) -> zbus::Result<()>;
+
+    /// Default for conversations: tell contacts when we've read their messages.
+    #[zbus(property)]
+    fn send_receipts(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_send_receipts(&self, on: bool) -> zbus::Result<()>;
+
+    /// Blocks `jid` on the server (XEP-0191), for every device.
+    fn block(&self, jid: &str) -> zbus::Result<()>;
+    fn unblock(&self, jid: &str) -> zbus::Result<()>;
 }
 
 /// A dictionary as passed over D-Bus (`a{sv}`).
@@ -233,6 +249,28 @@ pub trait Conversation {
     /// never, mentions or always.
     #[zbus(property)]
     fn set_muted(&self, muted: &str) -> zbus::Result<()>;
+
+    /// "default" (the account's setting), "on" or "off".
+    #[zbus(property)]
+    fn send_chat_states(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn set_send_chat_states(&self, value: &str) -> zbus::Result<()>;
+    /// Whether the peer sees that we're typing, after the account's default.
+    #[zbus(property)]
+    fn chat_states_enabled(&self) -> zbus::Result<bool>;
+
+    /// "default", "on" or "off".
+    #[zbus(property)]
+    fn send_receipts(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn set_send_receipts(&self, value: &str) -> zbus::Result<()>;
+    /// Whether the peer sees that we've read their messages.
+    #[zbus(property)]
+    fn receipts_enabled(&self) -> zbus::Result<bool>;
+
+    /// Whether the peer is on our blocklist.
+    #[zbus(property)]
+    fn blocked(&self) -> zbus::Result<bool>;
 
     /// Corrects one of our messages.
     fn correct(&self, id: &str, body: &str) -> zbus::Result<()>;

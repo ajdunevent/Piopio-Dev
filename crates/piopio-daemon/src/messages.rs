@@ -193,6 +193,40 @@ impl Conversations {
         }
     }
 
+    /// Re-announces a conversation's Blocked (the blocklist changed).
+    pub async fn blocked_changed(&self, shared: &Shared, jid: &str) {
+        let Some((_, path)) = self.by_peer.lock().await.get(jid).cloned() else {
+            return;
+        };
+        if let Some(iface) = self.iface(shared, &path).await {
+            let object = iface.get().await;
+            let _ = object.blocked_changed(iface.signal_emitter()).await;
+        }
+    }
+
+    /// Re-announces every conversation's effective typing and receipt
+    /// settings (the account's defaults changed).
+    pub async fn privacy_changed(&self, shared: &Shared) {
+        let paths: Vec<_> = self
+            .by_peer
+            .lock()
+            .await
+            .values()
+            .map(|(_, p)| p.clone())
+            .collect();
+        for path in paths {
+            if let Some(iface) = self.iface(shared, &path).await {
+                let object = iface.get().await;
+                let _ = object
+                    .chat_states_enabled_changed(iface.signal_emitter())
+                    .await;
+                let _ = object
+                    .receipts_enabled_changed(iface.signal_emitter())
+                    .await;
+            }
+        }
+    }
+
     /// Re-announces a conversation's Avatar.
     pub async fn avatar_changed(&self, shared: &Shared, jid: &str) {
         let Some((_, path)) = self.by_peer.lock().await.get(jid).cloned() else {
@@ -1229,6 +1263,16 @@ pub async fn emit_changed(
     }
 }
 
+fn check_override(value: &str) -> zbus::fdo::Result<()> {
+    if matches!(value, "default" | "on" | "off") {
+        Ok(())
+    } else {
+        Err(zbus::fdo::Error::InvalidArgs(
+            "the setting is default, on or off".into(),
+        ))
+    }
+}
+
 /// `net.dunevent.Piopio.Conversation`, at `<account>/conversation/<id>`.
 pub struct ConversationObject {
     session: Session,
@@ -1244,6 +1288,24 @@ impl ConversationObject {
     /// The Muted setting, for code outside the D-Bus interface.
     pub fn muted_setting(&self) -> &str {
         &self.row.muted
+    }
+
+    /// Whether this conversation tells the peer we're typing.
+    fn sends_chat_states(&self) -> bool {
+        match self.row.send_chat_states.as_str() {
+            "on" => true,
+            "off" => false,
+            _ => self.session.send_chat_states.load(Ordering::SeqCst),
+        }
+    }
+
+    /// Whether this conversation tells the peer we've read their messages.
+    fn sends_receipts(&self) -> bool {
+        match self.row.send_receipts.as_str() {
+            "on" => true,
+            "off" => false,
+            _ => self.session.send_receipts.load(Ordering::SeqCst),
+        }
     }
 
     fn peer_jid(&self) -> Option<BareJid> {
@@ -1393,7 +1455,11 @@ impl ConversationObject {
                 ));
             }
         };
-        if self.is_room() || self.our_state == state || !self.session.is_online() {
+        if self.is_room()
+            || self.our_state == state
+            || !self.session.is_online()
+            || !self.sends_chat_states()
+        {
             return Ok(());
         }
         // Only tell contacts who share presence with us that we're typing.
@@ -1442,6 +1508,57 @@ impl ConversationObject {
     async fn set_pinned(&mut self, pinned: bool) {
         self.row.pinned = pinned;
         self.save().await;
+    }
+
+    /// "default" (the account's setting), "on" or "off": whether the peer
+    /// sees that we're typing. Writable.
+    #[zbus(property)]
+    fn send_chat_states(&self) -> String {
+        self.row.send_chat_states.clone()
+    }
+
+    #[zbus(property)]
+    async fn set_send_chat_states(&mut self, value: String) -> zbus::fdo::Result<()> {
+        check_override(&value)?;
+        self.row.send_chat_states = value;
+        self.save().await;
+        Ok(())
+    }
+
+    /// Whether the peer sees that we're typing, after applying the
+    /// account's default.
+    #[zbus(property)]
+    fn chat_states_enabled(&self) -> bool {
+        self.sends_chat_states()
+    }
+
+    /// "default", "on" or "off": whether the peer sees that we've read
+    /// their messages. Writable.
+    #[zbus(property)]
+    fn send_receipts(&self) -> String {
+        self.row.send_receipts.clone()
+    }
+
+    #[zbus(property)]
+    async fn set_send_receipts(&mut self, value: String) -> zbus::fdo::Result<()> {
+        check_override(&value)?;
+        self.row.send_receipts = value;
+        self.save().await;
+        Ok(())
+    }
+
+    /// Whether the peer sees that we've read their messages, after
+    /// applying the account's default.
+    #[zbus(property)]
+    fn receipts_enabled(&self) -> bool {
+        self.sends_receipts()
+    }
+
+    /// Whether the peer is on our blocklist (XEP-0191). Account.Block and
+    /// Account.Unblock change it.
+    #[zbus(property)]
+    async fn blocked(&self) -> bool {
+        self.session.blocked.contains(&self.row.peer).await
     }
 
     /// never, mentions or always.
@@ -1944,7 +2061,7 @@ impl ConversationObject {
         let Some(peer) = self.peer_jid() else {
             return Ok(());
         };
-        if !self.shares_presence().await {
+        if self.is_room() || !self.sends_receipts() || !self.shares_presence().await {
             return Ok(());
         }
         let newest_incoming = self
