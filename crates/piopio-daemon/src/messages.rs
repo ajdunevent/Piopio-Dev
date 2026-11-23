@@ -116,6 +116,33 @@ impl Conversations {
     }
 
     /// Unexports every conversation (when the account goes away).
+    /// Forgets one conversation: off the bus, out of the database, its
+    /// files deleted. A room is left and its bookmark removed.
+    pub async fn delete(&self, session: &Session, peer: &str) {
+        let Some((id, path)) = self.by_peer.lock().await.remove(peer) else {
+            return;
+        };
+        if let Ok(room) = peer.parse::<BareJid>()
+            && session.rooms.is_room(peer).await
+        {
+            crate::rooms::forget(session, &room).await;
+        }
+        crate::rooms::unexport(session, &path).await;
+        let _ = session
+            .bus
+            .object_server()
+            .remove::<ConversationObject, _>(&path)
+            .await;
+        match session.store.delete_conversation(id).await {
+            Ok(files) => {
+                for f in files {
+                    let _ = tokio::fs::remove_file(f).await;
+                }
+            }
+            Err(e) => tracing::error!("deleting a conversation: {e:#}"),
+        }
+    }
+
     pub async fn unexport_all(&self, shared: &Shared) {
         for (_, (_, path)) in self.by_peer.lock().await.drain() {
             crate::rooms::unexport(shared, &path).await;
@@ -1748,6 +1775,20 @@ impl ConversationObject {
         tokio::spawn(async move {
             crate::files::download(&session, conversation, a, crate::files::MAX_FILE).await
         });
+        Ok(())
+    }
+
+    /// Deletes the conversation and its history from this computer (the
+    /// server's archive keeps its copy). Leaves a group chat for good.
+    async fn delete(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let session = self.session.clone();
+        let peer = self.row.peer.clone();
+        // Not from inside this object's own method call.
+        tokio::spawn(async move { session.conversations.delete(&session, &peer).await });
         Ok(())
     }
 

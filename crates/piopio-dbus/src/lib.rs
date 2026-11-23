@@ -220,6 +220,17 @@ pub trait Conversation {
     /// Downloads a message's file; file-state and file-path follow.
     fn download_file(&self, id: &str) -> zbus::Result<()>;
 
+    /// Deletes the conversation and its history from this computer.
+    fn delete(&self) -> zbus::Result<()>;
+
+    /// Pins the conversation to the top of the list.
+    #[zbus(property)]
+    fn set_pinned(&self, pinned: bool) -> zbus::Result<()>;
+
+    /// never, mentions or always.
+    #[zbus(property)]
+    fn set_muted(&self, muted: &str) -> zbus::Result<()>;
+
     /// Corrects one of our messages.
     fn correct(&self, id: &str, body: &str) -> zbus::Result<()>;
 

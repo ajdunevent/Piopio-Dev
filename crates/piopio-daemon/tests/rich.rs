@@ -32,18 +32,16 @@ async fn reply_correct_react_retract() {
     let bob = TestDaemon::start().await.unwrap();
     let (alice_path, alice_account) = alice.add_local("alice").await;
     let (bob_path, _) = bob.add_local("bob").await;
-    let alice_device = alice.wait_published(&alice_path).await;
+    alice.wait_published(&alice_path).await;
     let bob_device = bob.wait_published(&bob_path).await;
-    // Each must know the other's new device (from PEP notifications), or
-    // the first messages are encrypted only for their older devices.
-    alice
-        .wait_device(&alice_path, "bob@localhost", bob_device)
-        .await;
-    bob.wait_device(&bob_path, "alice@localhost", alice_device)
-        .await;
 
     let alice_chat = alice
         .conversation(alice_account.start_chat("bob@localhost").await.unwrap())
+        .await;
+    // Starting the chat fetches Bob's devices (or a notification brings
+    // them, if they are contacts from earlier tests).
+    alice
+        .wait_device(&alice_path, "bob@localhost", bob_device)
         .await;
     let hello = alice_chat.send("Hello", HashMap::new()).await.unwrap();
     let bob_chat = wait_for(20, "Bob's conversation", || async {
@@ -127,4 +125,26 @@ async fn reply_correct_react_retract() {
     let mine = message(&mine, &hello).unwrap();
     assert!(flag(mine, "retracted"));
     assert!(reactions(mine).is_empty());
+
+    // Deleting the conversation takes it off the bus and out of storage.
+    alice_chat.delete().await.unwrap();
+    wait_for(20, "the conversation to go", || async {
+        alice
+            .conversation_with(&alice_path, "bob@localhost")
+            .await
+            .is_none()
+            .then_some(())
+    })
+    .await;
+    let again = alice_account.start_chat("bob@localhost").await.unwrap();
+    let fresh = alice.conversation(again).await;
+    assert!(
+        fresh
+            .get_messages("", 50)
+            .await
+            .unwrap()
+            .iter()
+            .all(|m| text(m, "body") != "Hi back"),
+        "history is gone"
+    );
 }

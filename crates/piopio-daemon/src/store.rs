@@ -801,6 +801,29 @@ impl Store {
         .await
     }
 
+    /// Deletes a conversation with its messages; returns the files its
+    /// messages kept on disk, for the caller to remove.
+    pub async fn delete_conversation(&self, id: i64) -> anyhow::Result<Vec<String>> {
+        self.with(move |db| {
+            let mut q = db.prepare(
+                "SELECT a.path, a.thumbnail FROM attachments a
+                 JOIN messages m ON m.id = a.message_id WHERE m.conversation_id = ?1",
+            )?;
+            let files: Vec<String> = q
+                .query_map([id], |r| {
+                    Ok([r.get::<_, String>(0)?, r.get::<_, String>(1)?])
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .filter(|p| !p.is_empty())
+                .collect();
+            db.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+            Ok(files)
+        })
+        .await
+    }
+
     pub async fn set_attachment(&self, a: AttachmentRow) -> anyhow::Result<()> {
         self.with(move |db| {
             db.execute(

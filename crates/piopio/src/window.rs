@@ -46,6 +46,8 @@ pub struct Window {
     entries: RefCell<HashMap<String, Entry>>,
     pub accounts: RefCell<Vec<Rc<AccountInfo>>>,
     open: RefCell<Option<(String, Rc<ChatPage>)>>,
+    /// Shown when no conversation is open.
+    placeholder: adw::NavigationPage,
 }
 
 impl Window {
@@ -132,9 +134,10 @@ impl Window {
                 .build(),
         ));
 
+        let placeholder = adw::NavigationPage::new(&placeholder, "Chat");
         let split = adw::NavigationSplitView::builder()
             .sidebar(&adw::NavigationPage::new(&sidebar, "Piopio"))
-            .content(&adw::NavigationPage::new(&placeholder, "Chat"))
+            .content(&placeholder)
             .min_sidebar_width(260.0)
             .build();
 
@@ -168,6 +171,7 @@ impl Window {
             entries: RefCell::new(HashMap::new()),
             accounts: RefCell::new(Vec::new()),
             open: RefCell::new(None),
+            placeholder,
         });
 
         let weak = Rc::downgrade(&this);
@@ -535,7 +539,11 @@ impl Window {
                 let title = proxy.receive_title_changed().await;
                 let last = proxy.receive_last_activity_changed().await;
                 let picture = proxy.receive_avatar_changed().await;
+                let pinned = proxy.receive_pinned_changed().await;
                 Some(futures_util::stream::select_all([
+                    pinned
+                        .filter_map(|c| async move { c.get().await.ok().map(RowEvent::Pinned) })
+                        .boxed(),
                     picture
                         .filter_map(|c| async move { c.get().await.ok().map(RowEvent::Avatar) })
                         .boxed(),
@@ -593,6 +601,12 @@ impl Window {
                 entry.avatar.set_text(Some(&t));
             }
             RowEvent::Avatar(path) => set_avatar_image(&entry.avatar, &path),
+            RowEvent::Pinned(p) => {
+                entry.pinned = p;
+                store_sort_keys(&entry.row, entry.last_activity, p);
+                drop(entries);
+                self.list.invalidate_sort();
+            }
             RowEvent::Activity(t) => {
                 entry.last_activity = t;
                 store_sort_keys(&entry.row, t, entry.pinned);
@@ -605,6 +619,12 @@ impl Window {
     fn remove_conversation(&self, key: &str) {
         if let Some(entry) = self.entries.borrow_mut().remove(key) {
             self.list.remove(&entry.row);
+        }
+        let was_open = self.open.borrow().as_ref().is_some_and(|(k, _)| k == key);
+        if was_open {
+            self.open.borrow_mut().take();
+            self.split.set_content(Some(&self.placeholder));
+            self.split.set_show_content(false);
         }
         self.update_sidebar();
     }
@@ -666,6 +686,7 @@ enum RowEvent {
     Title(String),
     Activity(i64),
     Avatar(String),
+    Pinned(bool),
 }
 
 /// Shows a picture file in an avatar (or the initials when there's none).

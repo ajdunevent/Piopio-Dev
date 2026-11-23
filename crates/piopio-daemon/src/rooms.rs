@@ -266,6 +266,29 @@ pub async fn leave(session: &Session, room: &BareJid) {
     room_changed(session, room.as_str()).await;
 }
 
+/// Leaves a room for good: out of the room, bookmark removed, forgotten.
+pub async fn forget(session: &Session, room: &BareJid) {
+    if let Some(live) = session.rooms.get(room.as_str()).await
+        && live.state == "joined"
+        && let Ok(to) = format!("{room}/{}", live.nick).parse::<Jid>()
+    {
+        session.send(Presence::unavailable().with_to(to)).await;
+    }
+    session.rooms.live.lock().await.remove(room.as_str());
+    let retract = Element::builder("retract", ns::PUBSUB)
+        .attr(n("node"), BOOKMARKS)
+        .attr(n("notify"), "true")
+        .append(
+            Element::builder("item", ns::PUBSUB)
+                .attr(n("id"), room.as_str())
+                .build(),
+        )
+        .build();
+    let _ = session
+        .iq(crate::pep::set(None, crate::pep::pubsub(retract)))
+        .await;
+}
+
 /// After every login: learn the bookmarks and join the rooms to join.
 pub async fn online(session: &Session) {
     if let Some(items) = crate::pep::fetch_all(session, BOOKMARKS).await {
@@ -420,6 +443,18 @@ pub async fn bookmark_event(session: &Session, from: Option<&Jid>, items: &Eleme
     }
     if !session.is_own(from) {
         return true;
+    }
+    for retracted in items
+        .children()
+        .filter(|c| c.is("retract", ns::PUBSUB_EVENT))
+    {
+        if let Some(id) = retracted.attr("id")
+            && let Ok(room) = id.parse::<BareJid>()
+            && let Some(live) = session.rooms.get(room.as_str()).await
+            && live.state != "left"
+        {
+            leave(session, &room).await;
+        }
     }
     for item in items.children() {
         if item.is("item", ns::PUBSUB_EVENT)

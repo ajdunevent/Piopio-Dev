@@ -82,6 +82,16 @@ impl ChatPage {
             .visible(false)
             .build();
         let header = adw::HeaderBar::builder().title_widget(&title).build();
+        let menu = gtk::gio::Menu::new();
+        menu.append(Some("_Pin to Top"), Some("chat.pin"));
+        menu.append(Some("_Mute Notifications"), Some("chat.mute"));
+        menu.append(Some("_Delete Conversation…"), Some("chat.delete"));
+        let more = gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Conversation Menu")
+            .menu_model(&menu)
+            .build();
+        header.pack_end(&more);
         header.pack_end(&lock);
         header.pack_end(&people);
 
@@ -261,6 +271,8 @@ impl ChatPage {
                 crate::encryption::show(&window, this.proxy.clone(), this.own_jid.clone());
             }
         });
+
+        this.install_actions();
 
         // Load older messages when scrolled to the top.
         let weak = Rc::downgrade(&this);
@@ -529,6 +541,98 @@ impl ChatPage {
                 *state.borrow_mut() = now;
             }
         });
+    }
+
+    /// Pin, mute and delete, for the conversation menu.
+    fn install_actions(self: &Rc<Self>) {
+        let group = gtk::gio::SimpleActionGroup::new();
+        let pin = gtk::gio::SimpleAction::new_stateful("pin", None, &false.to_variant());
+        let mute = gtk::gio::SimpleAction::new_stateful("mute", None, &false.to_variant());
+        let delete = gtk::gio::SimpleAction::new("delete", None);
+        {
+            let proxy = self.proxy.clone();
+            pin.connect_activate(move |a, _| {
+                let on = !a.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
+                a.set_state(&on.to_variant());
+                let proxy = proxy.clone();
+                glib::spawn_future_local(async move {
+                    let _ = run(async move { proxy.set_pinned(on).await }).await;
+                });
+            });
+        }
+        {
+            let proxy = self.proxy.clone();
+            mute.connect_activate(move |a, _| {
+                let on = !a.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
+                a.set_state(&on.to_variant());
+                let proxy = proxy.clone();
+                glib::spawn_future_local(async move {
+                    let value = if on { "always" } else { "never" };
+                    let _ = run(async move { proxy.set_muted(value).await }).await;
+                });
+            });
+        }
+        {
+            let weak = Rc::downgrade(self);
+            delete.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    this.confirm_delete();
+                }
+            });
+        }
+        group.add_action(&pin);
+        group.add_action(&mute);
+        group.add_action(&delete);
+        self.page.insert_action_group("chat", Some(&group));
+        let proxy = self.proxy.clone();
+        glib::spawn_future_local(async move {
+            let state = run(async move {
+                (
+                    proxy.pinned().await.unwrap_or(false),
+                    proxy.muted().await.unwrap_or_default(),
+                )
+            })
+            .await;
+            pin.set_state(&state.0.to_variant());
+            mute.set_state(&(state.1 == "always").to_variant());
+        });
+    }
+
+    fn confirm_delete(self: &Rc<Self>) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let room = self.is_room.get();
+        let ask = adw::AlertDialog::new(
+            Some(if room {
+                "Leave and Delete Group Chat?"
+            } else {
+                "Delete Conversation?"
+            }),
+            Some(if room {
+                "You leave the group chat, it is removed from your other devices' bookmarks, and its history is deleted from this computer."
+            } else {
+                "Its history is deleted from this computer. It comes back if they write again."
+            }),
+        );
+        ask.add_responses(&[("cancel", "_Cancel"), ("delete", "_Delete")]);
+        ask.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        let proxy = self.proxy.clone();
+        let w = Rc::downgrade(&window);
+        ask.connect_response(None, move |_, response| {
+            if response != "delete" {
+                return;
+            }
+            let (proxy, w) = (proxy.clone(), w.clone());
+            glib::spawn_future_local(async move {
+                if let Err(e) = run(async move { proxy.delete().await }).await
+                    && let Some(w) = w.upgrade()
+                {
+                    w.toast(&client::explain(&e));
+                }
+            });
+        });
+        ask.present(Some(&window.window));
     }
 
     /// Tells the peer we're typing, and that we paused after 5 seconds.
