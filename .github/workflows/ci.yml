@@ -153,7 +153,11 @@ jobs:
       - if: steps.secrets.outputs.present == 'true'
         uses: Swatinem/rust-cache@v2
       - if: steps.secrets.outputs.present == 'true'
-        run: sudo apt-get update && sudo apt-get install -y dbus
+        # GStreamer headers: the daemon's tests build piopio-call.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus libgstreamer1.0-dev \
+            libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev
       - if: steps.secrets.outputs.present == 'true'
         env:
           PIOPIO_LOG: info,piopio_daemon=debug
