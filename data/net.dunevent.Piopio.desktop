@@ -9,4 +9,5 @@ Categories=Network;InstantMessaging;Chat;GTK;
 Keywords=xmpp;jabber;chat;messaging;omemo;
 MimeType=x-scheme-handler/xmpp;
 StartupNotify=true
+DBusActivatable=true
 X-Purism-FormFactor=Workstation;Mobile;

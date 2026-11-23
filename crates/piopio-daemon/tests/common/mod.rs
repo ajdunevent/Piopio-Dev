@@ -18,12 +18,19 @@ use zbus::proxy::CacheProperties;
 pub struct TestDaemon {
     pub child: Child,
     pub connection: zbus::Connection,
+    pub data: std::sync::Arc<tempfile::TempDir>,
     _bus: Child,
 }
 
 impl TestDaemon {
-    /// Starts a bus and the daemon, or returns None when dbus-daemon is missing.
+    /// Starts a bus and a daemon with a fresh data directory, or returns None
+    /// when dbus-daemon is missing.
     pub async fn start() -> Option<Self> {
+        Self::start_with(std::sync::Arc::new(tempfile::tempdir().unwrap())).await
+    }
+
+    /// Starts a daemon on `data` (to test what survives a restart).
+    pub async fn start_with(data: std::sync::Arc<tempfile::TempDir>) -> Option<Self> {
         let Ok(mut bus) = Command::new("dbus-daemon")
             .args(["--session", "--nofork", "--print-address=1"])
             .stdout(Stdio::piped())
@@ -42,6 +49,9 @@ impl TestDaemon {
 
         let child = Command::new(env!("CARGO_BIN_EXE_piopio-daemon"))
             .env("DBUS_SESSION_BUS_ADDRESS", &address)
+            .env("PIOPIO_DATA_DIR", data.path())
+            .env("PIOPIO_DB_KEY", "test-key")
+            .env("PIOPIO_ALLOW_PLAINTEXT", "1")
             .stdout(Stdio::null())
             .kill_on_drop(true)
             .spawn()
@@ -65,6 +75,7 @@ impl TestDaemon {
         Some(Self {
             child,
             connection,
+            data,
             _bus: bus,
         })
     }
@@ -104,4 +115,101 @@ where
     })
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+}
+
+/// The local test server (tests/server/run.sh), if one is running.
+pub fn test_server() -> Option<String> {
+    std::env::var("PIOPIO_TEST_SERVER").ok()
+}
+
+impl TestDaemon {
+    /// Adds `user@localhost` on the local test server and waits until it is connected.
+    pub async fn add_local(
+        &self,
+        user: &str,
+    ) -> (zbus::zvariant::OwnedObjectPath, AccountProxy<'static>) {
+        let server = test_server().expect("PIOPIO_TEST_SERVER is set");
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "test-plaintext-address",
+            zbus::zvariant::Value::from(server),
+        );
+        let path = self
+            .daemon()
+            .await
+            .add_account(&format!("{user}@localhost"), "password", options)
+            .await
+            .expect("AddAccount");
+        let account = self.account(path.clone()).await;
+        wait_until_connected(&account).await;
+        (path, account)
+    }
+
+    pub async fn roster(
+        &self,
+        path: zbus::zvariant::OwnedObjectPath,
+    ) -> piopio_dbus::RosterProxy<'static> {
+        piopio_dbus::RosterProxy::builder(&self.connection)
+            .path(path)
+            .unwrap()
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    pub async fn conversation(
+        &self,
+        path: zbus::zvariant::OwnedObjectPath,
+    ) -> piopio_dbus::ConversationProxy<'static> {
+        piopio_dbus::ConversationProxy::builder(&self.connection)
+            .path(path)
+            .unwrap()
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Object paths of the account's conversations, from the ObjectManager.
+    pub async fn conversations(
+        &self,
+        account: &zbus::zvariant::OwnedObjectPath,
+    ) -> Vec<zbus::zvariant::OwnedObjectPath> {
+        let manager = zbus::fdo::ObjectManagerProxy::builder(&self.connection)
+            .destination(piopio_dbus::DAEMON_BUS_NAME)
+            .unwrap()
+            .path(piopio_dbus::ROOT_PATH)
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let prefix = format!("{}/conversation/", account.as_str());
+        let mut paths: Vec<_> = manager
+            .get_managed_objects()
+            .await
+            .unwrap()
+            .into_keys()
+            .filter(|p| p.as_str().starts_with(&prefix))
+            .collect();
+        paths.sort_by_key(|p| p.as_str().to_owned());
+        paths
+    }
+}
+
+pub async fn wait_until_connected(account: &AccountProxy<'_>) {
+    let state = wait_for(30, "the account to connect or fail", || async {
+        let state = account.state().await.unwrap();
+        (state == "connected" || state == "error").then_some(state)
+    })
+    .await;
+    let error = account.error().await.unwrap();
+    assert_eq!(state, "connected", "login failed: {error}");
+}
+
+/// The string value of `key` in a D-Bus dictionary.
+pub fn text(dict: &piopio_dbus::Dict, key: &str) -> String {
+    dict.get(key)
+        .and_then(|v| String::try_from(v.try_clone().ok()?).ok())
+        .unwrap_or_default()
 }

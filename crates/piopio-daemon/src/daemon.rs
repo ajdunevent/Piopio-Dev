@@ -3,24 +3,47 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use piopio_dbus::{ACCOUNT_PATH_PREFIX, DAEMON_API_VERSION};
+use piopio_dbus::DAEMON_API_VERSION;
 use tokio::sync::{Mutex, watch};
 use tokio_xmpp::jid::BareJid;
 use zbus::message::Header;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, Value};
 
 use crate::access;
-use crate::account::Account;
+use crate::account::{Account, server_from_options};
+use crate::connect::Server;
+use crate::store::Store;
 
-/// Every account the daemon is running, by bare JID.
-#[derive(Default)]
+/// Every account the daemon is running.
 pub struct Accounts {
+    store: Store,
     by_jid: HashMap<BareJid, Account>,
-    next_id: u64,
 }
 
 impl Accounts {
-    /// Disconnect every account cleanly.
+    pub fn new(store: Store) -> Self {
+        Self {
+            store,
+            by_jid: HashMap::new(),
+        }
+    }
+
+    /// Starts every stored account (enabled ones connect).
+    pub async fn load(&mut self, bus: &zbus::Connection) -> anyhow::Result<()> {
+        for row in self.store.accounts().await? {
+            let server: Server = serde_json::from_str(&row.options).unwrap_or_default();
+            let jid: BareJid = row.jid.parse()?;
+            match Account::start(bus, self.store.clone(), row, server).await {
+                Ok(account) => {
+                    self.by_jid.insert(jid, account);
+                }
+                Err(e) => tracing::error!(%jid, "could not start the account: {e:#}"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Disconnects every account cleanly.
     pub async fn stop_all(&mut self) {
         for (_, account) in self.by_jid.drain() {
             account.stop().await;
@@ -39,19 +62,22 @@ impl Daemon {
     }
 }
 
+fn failed(e: impl std::fmt::Display) -> zbus::fdo::Error {
+    zbus::fdo::Error::Failed(e.to_string())
+}
+
 #[zbus::interface(name = "net.dunevent.Piopio.Daemon")]
 impl Daemon {
-    /// Add an account and start connecting. Returns the account's object path.
+    /// Adds an account, stores it, and starts connecting. Returns its path.
     ///
-    /// Credentials are only held in memory for now; storing them through the
-    /// Secret portal comes with the encrypted database.
+    /// Options: `host` (s) and `port` (q or u) to skip DNS SRV lookup.
     async fn add_account(
         &self,
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &zbus::Connection,
         jid: &str,
         password: &str,
-        _options: HashMap<&str, Value<'_>>,
+        options: HashMap<&str, Value<'_>>,
     ) -> zbus::fdo::Result<OwnedObjectPath> {
         access::check(&header)?;
         let jid: BareJid = jid
@@ -62,27 +88,40 @@ impl Daemon {
                 "the JID needs a user part, like user@example.org".into(),
             ));
         }
+        let server = server_from_options(&options)?;
 
         let mut accounts = self.accounts.lock().await;
         if accounts.by_jid.contains_key(&jid) {
             return Err(zbus::fdo::Error::Failed(format!("{jid} is already added")));
         }
-        accounts.next_id += 1;
-        let path = OwnedObjectPath::try_from(format!("{ACCOUNT_PATH_PREFIX}/{}", accounts.next_id))
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-
-        let account = Account::start(connection, path.clone(), jid.clone(), password.to_owned())
+        let store = accounts.store.clone();
+        let id = store
+            .add_account(
+                jid.to_string(),
+                password.to_owned(),
+                serde_json::to_string(&server).map_err(failed)?,
+            )
             .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            .map_err(failed)?;
+        let row = store
+            .accounts()
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .find(|a| a.id == id)
+            .ok_or_else(|| failed("the new account vanished"))?;
+        let account = Account::start(connection, store, row, server)
+            .await
+            .map_err(failed)?;
+        let path = account.path.clone();
         accounts.by_jid.insert(jid, account);
         Ok(path)
     }
 
-    /// Disconnect an account and forget it.
+    /// Disconnects an account and deletes it with all its local data.
     async fn remove_account(
         &self,
         #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &zbus::Connection,
         account: ObjectPath<'_>,
     ) -> zbus::fdo::Result<()> {
         access::check(&header)?;
@@ -94,17 +133,29 @@ impl Daemon {
             .map(|(jid, _)| jid.clone())
             .ok_or_else(|| zbus::fdo::Error::UnknownObject(account.to_string()))?;
         let removed = accounts.by_jid.remove(&jid).expect("found above");
-        let path = removed.path.clone();
+        let id = removed.id;
         removed.stop().await;
-        connection
-            .object_server()
-            .remove::<crate::account::AccountObject, _>(&path)
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        accounts.store.remove_account(id).await.map_err(failed)?;
         Ok(())
     }
 
-    /// Disconnect everything and exit.
+    /// Lists the accounts' object paths.
+    async fn list_accounts(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+    ) -> zbus::fdo::Result<Vec<OwnedObjectPath>> {
+        access::check(&header)?;
+        let accounts = self.accounts.lock().await;
+        let mut paths: Vec<(i64, OwnedObjectPath)> = accounts
+            .by_jid
+            .values()
+            .map(|a| (a.id, a.path.clone()))
+            .collect();
+        paths.sort_by_key(|(id, _)| *id);
+        Ok(paths.into_iter().map(|(_, p)| p).collect())
+    }
+
+    /// Disconnects everything and exits.
     async fn quit(&self, #[zbus(header)] header: Header<'_>) -> zbus::fdo::Result<()> {
         access::check(&header)?;
         let _ = self.quit.send(true);

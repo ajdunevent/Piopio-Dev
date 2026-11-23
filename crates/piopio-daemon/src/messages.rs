@@ -1,0 +1,775 @@
+//! One-to-one conversations: sending, receiving, Carbons (XEP-0280), receipts
+//! (XEP-0184), displayed markers (XEP-0333) and archive catch-up (XEP-0313).
+//!
+//! Every message, however it arrives (live, as a carbon, or from the archive),
+//! goes through [`store_message`], which drops duplicates. That makes the
+//! three sources safe to overlap.
+
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+
+use tokio::sync::Mutex;
+use tokio_xmpp::jid::{BareJid, Jid};
+use tokio_xmpp::parsers::carbons;
+use tokio_xmpp::parsers::delay::Delay;
+use tokio_xmpp::parsers::displayed_markers::{Displayed, Markable};
+use tokio_xmpp::parsers::iq::Iq;
+use tokio_xmpp::parsers::mam;
+use tokio_xmpp::parsers::message::{Id, Lang, Message, MessageType};
+use tokio_xmpp::parsers::receipts;
+use tokio_xmpp::parsers::rsm::SetQuery;
+use tokio_xmpp::parsers::stanza_id::{OriginId, StanzaId};
+use tokio_xmpp::stanzastream::{StanzaStage, StanzaState};
+use zbus::object_server::{InterfaceRef, SignalEmitter};
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Str, Value};
+
+use piopio_dbus::CONVERSATION_API_VERSION;
+
+use crate::access;
+use crate::session::{Session, Shared, new_id, now_ms};
+use crate::store::{ConversationRow, MessageRow, NewMessage, state};
+
+/// Messages fetched from the archive on the very first login.
+const FIRST_SYNC_MESSAGES: usize = 100;
+/// Archive pages fetched per catch-up before giving up for this session.
+const MAX_CATCH_UP_PAGES: usize = 50;
+
+/// The account's conversations that are exported on the bus, by peer.
+#[derive(Default)]
+pub struct Conversations {
+    by_peer: Mutex<HashMap<String, (i64, OwnedObjectPath)>>,
+}
+
+impl Conversations {
+    /// Exports every stored conversation of the account.
+    pub async fn load(&self, session: &Session) -> anyhow::Result<()> {
+        for row in session.store.conversations(session.account_id).await? {
+            self.export(session, row).await?;
+        }
+        Ok(())
+    }
+
+    /// The conversation with `peer`, created and exported if new.
+    pub async fn get(
+        &self,
+        session: &Session,
+        peer: &BareJid,
+    ) -> anyhow::Result<(i64, OwnedObjectPath)> {
+        if let Some(found) = self.by_peer.lock().await.get(peer.as_str()) {
+            return Ok(found.clone());
+        }
+        let (row, _) = session
+            .store
+            .conversation(session.account_id, peer.to_string(), "chat")
+            .await?;
+        self.export(session, row).await
+    }
+
+    async fn export(
+        &self,
+        session: &Session,
+        row: ConversationRow,
+    ) -> anyhow::Result<(i64, OwnedObjectPath)> {
+        let mut map = self.by_peer.lock().await;
+        if let Some(found) = map.get(&row.peer) {
+            return Ok(found.clone());
+        }
+        let path = OwnedObjectPath::try_from(format!("{}/conversation/{}", session.path, row.id))?;
+        let title = crate::roster::display_name(session, &row.peer).await;
+        let entry = (row.id, path.clone());
+        map.insert(row.peer.clone(), entry.clone());
+        drop(map);
+        let object = ConversationObject {
+            session: session.clone(),
+            row,
+            title,
+        };
+        session.bus.object_server().at(&path, object).await?;
+        Ok(entry)
+    }
+
+    /// Unexports every conversation (when the account goes away).
+    pub async fn unexport_all(&self, shared: &Shared) {
+        for (_, (_, path)) in self.by_peer.lock().await.drain() {
+            let _ = shared
+                .bus
+                .object_server()
+                .remove::<ConversationObject, _>(&path)
+                .await;
+        }
+    }
+
+    /// Keeps a conversation's Title in step with the contact's roster name.
+    pub async fn contact_renamed(&self, shared: &Shared, jid: &str, name: &str) {
+        let Some((_, path)) = self.by_peer.lock().await.get(jid).cloned() else {
+            return;
+        };
+        let Ok(iface) = shared
+            .bus
+            .object_server()
+            .interface::<_, ConversationObject>(&path)
+            .await
+        else {
+            return;
+        };
+        let mut object = iface.get_mut().await;
+        let title = if name.is_empty() {
+            jid.to_owned()
+        } else {
+            name.to_owned()
+        };
+        if object.title != title {
+            object.title = title;
+            let _ = object.title_changed(iface.signal_emitter()).await;
+        }
+    }
+
+    async fn iface(
+        &self,
+        shared: &Shared,
+        path: &OwnedObjectPath,
+    ) -> Option<InterfaceRef<ConversationObject>> {
+        shared
+            .bus
+            .object_server()
+            .interface::<_, ConversationObject>(path)
+            .await
+            .ok()
+    }
+}
+
+/// Where a message came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Source {
+    Live,
+    Carbon,
+    Archive { first_sync: bool },
+}
+
+/// Turns on Carbons so messages to and from our other devices show up here.
+pub async fn enable_carbons(shared: &Shared) {
+    if let Err(e) = shared.iq(Iq::from_set("", carbons::Enable)).await {
+        tracing::info!("the server did not enable carbons: {e}");
+    }
+}
+
+/// Handles every incoming `<message/>`.
+pub async fn incoming(session: &Session, mut message: Message) {
+    // Archive results for our own queries.
+    if let Ok(Some(result)) = message.extract_payload::<mam::Result_>() {
+        if !session.is_own(message.from.as_ref()) {
+            tracing::warn!(from = ?message.from, "archive result from someone else ignored");
+            return;
+        }
+        let first_sync = result
+            .queryid
+            .as_ref()
+            .is_some_and(|q| q.0.starts_with("first-"));
+        let forwarded = result.forwarded;
+        handle(
+            session,
+            forwarded.message,
+            forwarded.delay,
+            Some(result.id),
+            Source::Archive { first_sync },
+        )
+        .await;
+        return;
+    }
+
+    // Carbons are only valid from our own account; anything else is forged.
+    let carbon_sent = message.extract_payload::<carbons::Sent>().ok().flatten();
+    let carbon_received = message
+        .extract_payload::<carbons::Received>()
+        .ok()
+        .flatten();
+    if carbon_sent.is_some() || carbon_received.is_some() {
+        if !session.is_own(message.from.as_ref()) {
+            tracing::warn!(from = ?message.from, "forged carbon ignored");
+            return;
+        }
+        let forwarded = match (carbon_sent, carbon_received) {
+            (Some(sent), _) => sent.forwarded,
+            (_, Some(received)) => received.forwarded,
+            _ => unreachable!(),
+        };
+        handle(
+            session,
+            forwarded.message,
+            forwarded.delay,
+            None,
+            Source::Carbon,
+        )
+        .await;
+        return;
+    }
+
+    let delay = message.extract_payload::<Delay>().ok().flatten();
+    handle(session, message, delay, None, Source::Live).await;
+}
+
+async fn handle(
+    session: &Session,
+    mut message: Message,
+    delay: Option<Delay>,
+    archive_id: Option<String>,
+    source: Source,
+) {
+    let from_bare = message.from.as_ref().map(Jid::to_bare);
+    let outgoing = from_bare.as_ref().is_none_or(|b| *b == session.jid);
+    let peer = if outgoing {
+        message.to.as_ref().map(Jid::to_bare)
+    } else {
+        from_bare.clone()
+    };
+    let Some(peer) = peer else { return };
+    if peer == session.jid && source != Source::Live {
+        // Notes to self arrive twice (sent and received); keep the sent copy.
+        if !outgoing {
+            return;
+        }
+    }
+
+    if message.type_ == MessageType::Error {
+        if let Some(id) = &message.id {
+            mark(session, &peer, &id.0, state::FAILED).await;
+        }
+        return;
+    }
+    if !matches!(message.type_, MessageType::Chat | MessageType::Normal) {
+        return; // group chats and headlines come later
+    }
+
+    // Receipts and markers about our own outgoing messages.
+    if let Ok(Some(received)) = message.extract_payload::<receipts::Received>() {
+        if !outgoing {
+            mark(session, &peer, &received.id, state::RECEIVED).await;
+        }
+    }
+    if let Ok(Some(displayed)) = message.extract_payload::<Displayed>() {
+        if outgoing {
+            // We read the chat on another device.
+            if source != (Source::Archive { first_sync: true }) {
+                set_unread(session, &peer, 0).await;
+            }
+        } else {
+            mark(session, &peer, &displayed.id.0, state::DISPLAYED).await;
+        }
+    }
+
+    let Some((_, body)) = message.get_best_body_cloned(vec![]) else {
+        return;
+    };
+    let wants_receipt = matches!(message.extract_payload::<receipts::Request>(), Ok(Some(_)));
+    let origin = message
+        .extract_payload::<OriginId>()
+        .ok()
+        .flatten()
+        .map(|o| o.id);
+    let stanza_id = message
+        .extract_payload::<StanzaId>()
+        .ok()
+        .flatten()
+        .filter(|s| s.by.to_bare() == session.jid && s.by.resource().is_none())
+        .map(|s| s.id);
+    let server_id = archive_id.or(stanza_id);
+    let origin_id = origin
+        .or_else(|| message.id.as_ref().map(|i| i.0.clone()))
+        .or_else(|| server_id.clone())
+        .unwrap_or_else(new_id);
+    let timestamp = delay
+        .map(|d| d.stamp.0.timestamp_millis())
+        .unwrap_or_else(now_ms);
+    let sender = if outgoing {
+        session.jid.to_string()
+    } else {
+        peer.to_string()
+    };
+
+    let new = NewMessage {
+        origin_id,
+        server_id: server_id.clone(),
+        outgoing,
+        sender,
+        body,
+        timestamp,
+        state: if outgoing {
+            state::SENT
+        } else {
+            state::RECEIVED
+        },
+    };
+    let counts_as_unread = !outgoing && source != (Source::Archive { first_sync: true });
+    let stored = store_message(session, &peer, new, counts_as_unread).await;
+
+    // Live archive ids keep the catch-up position current once caught up.
+    if source == Source::Live
+        && session.caught_up.load(Ordering::SeqCst)
+        && let Some(id) = server_id
+    {
+        let _ = session.store.set_mam_last_id(session.account_id, id).await;
+    }
+
+    if source == Source::Live && !outgoing && wants_receipt {
+        if let (Some(to), Some(id)) = (message.from.clone(), message.id.clone()) {
+            let receipt = Message::new_with_type(MessageType::Chat, Some(to))
+                .with_payload(receipts::Received { id: id.0 });
+            session.send(receipt).await;
+        }
+    }
+
+    if let Some((row, conversation)) = stored
+        && !outgoing
+        && source != (Source::Archive { first_sync: true })
+    {
+        crate::notify::message(session, &conversation, &row).await;
+    }
+}
+
+/// Stores a message, updates its conversation and tells the UI. Returns the
+/// stored row and the conversation path, or None for a duplicate.
+async fn store_message(
+    session: &Session,
+    peer: &BareJid,
+    new: NewMessage,
+    unread: bool,
+) -> Option<(MessageRow, OwnedObjectPath)> {
+    let (id, path) = match session.conversations.get(session, peer).await {
+        Ok(found) => found,
+        Err(e) => {
+            tracing::error!("opening the conversation with {peer}: {e:#}");
+            return None;
+        }
+    };
+    let row = match session.store.insert_message(id, new).await {
+        Ok(Some(row)) => row,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::error!("storing a message: {e:#}");
+            return None;
+        }
+    };
+    if let Some(iface) = session.conversations.iface(session, &path).await {
+        let emitter = iface.signal_emitter().clone();
+        let _ = ConversationObject::message_added(&emitter, message_dict(&row)).await;
+        let mut object = iface.get_mut().await;
+        let mut changed = false;
+        if row.timestamp > object.row.last_activity {
+            object.row.last_activity = row.timestamp;
+            let _ = object.last_activity_changed(&emitter).await;
+            changed = true;
+        }
+        if unread {
+            object.row.unread += 1;
+            let _ = object.unread_changed(&emitter).await;
+            changed = true;
+        }
+        if changed {
+            let _ = session.store.update_conversation(object.row.clone()).await;
+        }
+    }
+    Some((row, path))
+}
+
+/// Moves one of our outgoing messages forward (sent → received → displayed).
+async fn mark(session: &Session, peer: &BareJid, origin_id: &str, new_state: &'static str) {
+    let Ok((id, path)) = session.conversations.get(session, peer).await else {
+        return;
+    };
+    if let Ok(Some(row)) = session
+        .store
+        .advance_state(id, origin_id.to_owned(), new_state)
+        .await
+        && let Some(iface) = session.conversations.iface(session, &path).await
+    {
+        let changes = HashMap::from([("state", Value::from(row.state.clone()))]);
+        let _ = ConversationObject::message_changed(
+            iface.signal_emitter(),
+            &row.id.to_string(),
+            changes,
+        )
+        .await;
+    }
+}
+
+async fn set_unread(session: &Session, peer: &BareJid, unread: u32) {
+    let Ok((_, path)) = session.conversations.get(session, peer).await else {
+        return;
+    };
+    if let Some(iface) = session.conversations.iface(session, &path).await {
+        let mut object = iface.get_mut().await;
+        if object.row.unread != unread {
+            object.row.unread = unread;
+            let _ = object.unread_changed(iface.signal_emitter()).await;
+            let _ = session.store.update_conversation(object.row.clone()).await;
+        }
+    }
+}
+
+/// Fetches what arrived while we were offline from our own archive.
+pub async fn catch_up(session: &Session) {
+    let last = session
+        .store
+        .accounts()
+        .await
+        .ok()
+        .and_then(|rows| rows.into_iter().find(|a| a.id == session.account_id))
+        .and_then(|a| a.mam_last_id);
+    let first_sync = last.is_none();
+    let mut after = last;
+
+    for page in 0..MAX_CATCH_UP_PAGES {
+        let queryid = if first_sync {
+            format!("first-{}", new_id())
+        } else {
+            format!("catchup-{}", new_id())
+        };
+        let set = if first_sync {
+            // The newest page: an empty <before/>.
+            SetQuery {
+                max: Some(FIRST_SYNC_MESSAGES),
+                after: None,
+                before: Some(String::new()),
+                index: None,
+            }
+        } else {
+            SetQuery {
+                max: Some(100),
+                after: after.clone(),
+                before: None,
+                index: None,
+            }
+        };
+        let query = mam::Query {
+            queryid: Some(mam::QueryId(queryid)),
+            node: None,
+            form: None,
+            set: Some(set),
+            flip_page: false,
+        };
+        let fin = match session.iq(Iq::from_set("", query)).await {
+            Ok(Some(payload)) => match mam::Fin::try_from(payload) {
+                Ok(fin) => fin,
+                Err(e) => {
+                    tracing::warn!("unreadable archive answer: {e}");
+                    break;
+                }
+            },
+            Ok(None) => break,
+            Err(e) => {
+                tracing::info!("archive query failed: {e}");
+                // A stored position the server no longer knows: start over.
+                if page == 0 && !first_sync {
+                    let _ = session
+                        .store
+                        .set_mam_last_id(session.account_id, String::new())
+                        .await;
+                }
+                break;
+            }
+        };
+        if let Some(newest) = fin.set.last.clone() {
+            let _ = session
+                .store
+                .set_mam_last_id(session.account_id, newest.clone())
+                .await;
+            after = Some(newest);
+        }
+        if first_sync || fin.complete || fin.set.last.is_none() {
+            break;
+        }
+    }
+    session.caught_up.store(true, Ordering::SeqCst);
+    tracing::info!(jid = %session.jid, "caught up with the archive");
+}
+
+fn str_value(s: impl Into<String>) -> OwnedValue {
+    OwnedValue::from(Str::from(s.into()))
+}
+
+/// A message as the UI sees it.
+pub fn message_dict(m: &MessageRow) -> HashMap<String, OwnedValue> {
+    let mut map = HashMap::new();
+    map.insert("id".into(), str_value(m.id.to_string()));
+    map.insert("origin-id".into(), str_value(m.origin_id.clone()));
+    map.insert(
+        "server-id".into(),
+        str_value(m.server_id.clone().unwrap_or_default()),
+    );
+    map.insert("outgoing".into(), OwnedValue::from(m.outgoing));
+    map.insert("sender".into(), str_value(m.sender.clone()));
+    map.insert("body".into(), str_value(m.body.clone()));
+    map.insert("timestamp".into(), OwnedValue::from(m.timestamp));
+    map.insert("state".into(), str_value(m.state.clone()));
+    map.insert("encryption".into(), str_value("none"));
+    map
+}
+
+/// `net.dunevent.Piopio.Conversation`, at `<account>/conversation/<id>`.
+pub struct ConversationObject {
+    session: Session,
+    row: ConversationRow,
+    title: String,
+}
+
+impl ConversationObject {
+    /// The Muted setting, for code outside the D-Bus interface.
+    pub fn muted_setting(&self) -> &str {
+        &self.row.muted
+    }
+
+    fn peer_jid(&self) -> Option<BareJid> {
+        self.row.peer.parse().ok()
+    }
+
+    async fn save(&self) {
+        let _ = self
+            .session
+            .store
+            .update_conversation(self.row.clone())
+            .await;
+    }
+}
+
+#[zbus::interface(name = "net.dunevent.Piopio.Conversation")]
+impl ConversationObject {
+    #[zbus(property)]
+    fn peer(&self) -> String {
+        self.row.peer.clone()
+    }
+
+    /// chat, room or room-private.
+    #[zbus(property)]
+    fn kind(&self) -> String {
+        self.row.kind.clone()
+    }
+
+    #[zbus(property)]
+    fn title(&self) -> String {
+        self.title.clone()
+    }
+
+    #[zbus(property)]
+    fn avatar(&self) -> String {
+        String::new()
+    }
+
+    #[zbus(property)]
+    fn unread(&self) -> u32 {
+        self.row.unread
+    }
+
+    /// Milliseconds since the Unix epoch.
+    #[zbus(property)]
+    fn last_activity(&self) -> i64 {
+        self.row.last_activity
+    }
+
+    #[zbus(property)]
+    fn pinned(&self) -> bool {
+        self.row.pinned
+    }
+
+    #[zbus(property)]
+    async fn set_pinned(&mut self, pinned: bool) {
+        self.row.pinned = pinned;
+        self.save().await;
+    }
+
+    /// never, mentions or always.
+    #[zbus(property)]
+    fn muted(&self) -> String {
+        self.row.muted.clone()
+    }
+
+    #[zbus(property)]
+    async fn set_muted(&mut self, muted: String) -> zbus::fdo::Result<()> {
+        if !matches!(muted.as_str(), "never" | "mentions" | "always") {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "Muted is never, mentions or always".into(),
+            ));
+        }
+        self.row.muted = muted;
+        self.save().await;
+        Ok(())
+    }
+
+    /// The encryption in effect: none, omemo or omemo2. OMEMO arrives in milestone 2.
+    #[zbus(property)]
+    fn encryption(&self) -> String {
+        "none".into()
+    }
+
+    #[zbus(property)]
+    fn encryption_wanted(&self) -> bool {
+        self.row.encryption_wanted
+    }
+
+    #[zbus(property)]
+    async fn set_encryption_wanted(&mut self, wanted: bool) {
+        self.row.encryption_wanted = wanted;
+        self.save().await;
+    }
+
+    #[zbus(property)]
+    fn api_version(&self) -> u32 {
+        CONVERSATION_API_VERSION
+    }
+
+    /// One page of history, newest last: up to `limit` messages older than
+    /// the message `before_id` ("" for the newest).
+    async fn get_messages(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        before_id: &str,
+        limit: u32,
+    ) -> zbus::fdo::Result<Vec<HashMap<String, OwnedValue>>> {
+        access::check(&header)?;
+        let before = if before_id.is_empty() {
+            0
+        } else {
+            before_id
+                .parse()
+                .map_err(|_| zbus::fdo::Error::InvalidArgs("unknown message id".into()))?
+        };
+        let rows = self
+            .session
+            .store
+            .messages(self.row.id, before, limit.clamp(1, 500))
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        Ok(rows.iter().map(message_dict).collect())
+    }
+
+    /// Sends a message. Returns its id right away; its state follows as
+    /// MessageChanged signals (pending → sent → received → displayed).
+    async fn send(
+        &mut self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        body: &str,
+        _options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<String> {
+        access::check(&header)?;
+        if body.trim().is_empty() {
+            return Err(zbus::fdo::Error::InvalidArgs("the message is empty".into()));
+        }
+        let peer = self.peer_jid().ok_or_else(|| {
+            zbus::fdo::Error::Failed("this conversation has no valid peer".into())
+        })?;
+        let origin_id = new_id();
+        let row = self
+            .session
+            .store
+            .insert_message(
+                self.row.id,
+                NewMessage {
+                    origin_id: origin_id.clone(),
+                    server_id: None,
+                    outgoing: true,
+                    sender: self.session.jid.to_string(),
+                    body: body.to_owned(),
+                    timestamp: now_ms(),
+                    state: state::PENDING,
+                },
+            )
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .expect("a fresh origin id is never a duplicate");
+
+        Self::message_added(&emitter, message_dict(&row)).await?;
+        self.row.last_activity = row.timestamp;
+        self.last_activity_changed(&emitter).await?;
+        self.save().await;
+
+        let mut message = Message::chat(Some(Jid::from(peer.clone())))
+            .with_body(Lang::default(), body.to_owned())
+            .with_payload(OriginId {
+                id: origin_id.clone(),
+            })
+            .with_payload(receipts::Request)
+            .with_payload(Markable);
+        message.id = Some(Id(origin_id.clone()));
+
+        let session = self.session.clone();
+        let conversation = self.row.id;
+        let emitter = emitter.into_owned();
+        let message_id = row.id.to_string();
+        tokio::spawn(async move {
+            let new_state = match session.send(message).await {
+                None => state::FAILED,
+                Some(mut token) => match token.wait_for(StanzaStage::Sent).await {
+                    Some(StanzaState::Sent { .. } | StanzaState::Acked { .. }) => state::SENT,
+                    _ => state::FAILED,
+                },
+            };
+            if let Ok(Some(row)) = session
+                .store
+                .advance_state(conversation, origin_id, new_state)
+                .await
+            {
+                let changes = HashMap::from([("state", Value::from(row.state))]);
+                let _ = Self::message_changed(&emitter, &message_id, changes).await;
+            }
+        });
+        Ok(row.id.to_string())
+    }
+
+    /// The user has seen everything: clears Unread and, for contacts who share
+    /// presence with us, sends a displayed marker for the newest message.
+    async fn mark_read(
+        &mut self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        if self.row.unread != 0 {
+            self.row.unread = 0;
+            self.unread_changed(&emitter).await?;
+            self.save().await;
+        }
+        let Some(peer) = self.peer_jid() else {
+            return Ok(());
+        };
+        let trusted = self
+            .session
+            .store
+            .contacts(self.session.account_id)
+            .await
+            .ok()
+            .and_then(|cs| cs.into_iter().find(|c| c.jid == self.row.peer))
+            .is_some_and(|c| c.subscription == "from" || c.subscription == "both");
+        if !trusted {
+            return Ok(());
+        }
+        let newest_incoming = self
+            .session
+            .store
+            .messages(self.row.id, 0, 50)
+            .await
+            .ok()
+            .and_then(|ms| ms.into_iter().rev().find(|m| !m.outgoing));
+        if let Some(m) = newest_incoming {
+            let marker = Message::chat(Some(Jid::from(peer))).with_payload(Displayed {
+                id: Id(m.origin_id),
+            });
+            self.session.send(marker).await;
+        }
+        Ok(())
+    }
+
+    /// A message was stored: sent from here, received, or found in the archive.
+    #[zbus(signal)]
+    async fn message_added(
+        emitter: &SignalEmitter<'_>,
+        message: HashMap<String, OwnedValue>,
+    ) -> zbus::Result<()>;
+
+    /// Something about a stored message changed, such as its state.
+    #[zbus(signal)]
+    async fn message_changed(
+        emitter: &SignalEmitter<'_>,
+        id: &str,
+        changes: HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<()>;
+}

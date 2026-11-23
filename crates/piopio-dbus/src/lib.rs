@@ -23,6 +23,12 @@ pub const DAEMON_API_VERSION: u32 = 1;
 /// Version of the Account interface implemented by this build.
 pub const ACCOUNT_API_VERSION: u32 = 1;
 
+/// Version of the Roster interface implemented by this build.
+pub const ROSTER_API_VERSION: u32 = 1;
+
+/// Version of the Conversation interface implemented by this build.
+pub const CONVERSATION_API_VERSION: u32 = 1;
+
 /// Accounts live at `ACCOUNT_PATH_PREFIX/<id>`.
 pub const ACCOUNT_PATH_PREFIX: &str = "/net/dunevent/Piopio/account";
 
@@ -41,8 +47,11 @@ pub trait Daemon {
         options: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
     ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
 
-    /// Disconnect an account and forget it.
+    /// Disconnect an account and delete it with all its local data.
     fn remove_account(&self, account: &zbus::zvariant::ObjectPath<'_>) -> zbus::Result<()>;
+
+    /// The accounts' object paths, oldest first.
+    fn list_accounts(&self) -> zbus::Result<Vec<zbus::zvariant::OwnedObjectPath>>;
 
     /// Disconnect everything and exit.
     fn quit(&self) -> zbus::Result<()>;
@@ -64,6 +73,16 @@ pub trait Account {
     #[zbus(property)]
     fn enabled(&self) -> zbus::Result<bool>;
 
+    #[zbus(property)]
+    fn set_enabled(&self, enabled: bool) -> zbus::Result<()>;
+
+    /// Show (available, away, chat, dnd or xa) and status text.
+    #[zbus(property)]
+    fn presence(&self) -> zbus::Result<(String, String)>;
+
+    #[zbus(property)]
+    fn set_presence(&self, presence: (&str, &str)) -> zbus::Result<()>;
+
     /// One of disconnected, connecting, connected or error.
     #[zbus(property)]
     fn state(&self) -> zbus::Result<String>;
@@ -74,4 +93,77 @@ pub trait Account {
 
     #[zbus(property)]
     fn api_version(&self) -> zbus::Result<u32>;
+
+    /// Opens (or creates) the one-to-one conversation with `jid`.
+    fn start_chat(&self, jid: &str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+
+    /// Changes the password on the server, then uses it.
+    fn change_password(&self, new: &str) -> zbus::Result<()>;
+}
+
+/// A dictionary as passed over D-Bus (`a{sv}`).
+pub type Dict = std::collections::HashMap<String, zbus::zvariant::OwnedValue>;
+
+/// Client side of `net.dunevent.Piopio.Roster`, on each account object.
+#[zbus::proxy(
+    interface = "net.dunevent.Piopio.Roster",
+    default_service = "net.dunevent.Piopio.Daemon"
+)]
+pub trait Roster {
+    /// jid, name, groups, subscription, ask, presence, status, pending-in.
+    fn get_contacts(&self) -> zbus::Result<Vec<Dict>>;
+    fn add_contact(&self, jid: &str, name: &str, groups: &[&str]) -> zbus::Result<()>;
+    fn remove_contact(&self, jid: &str) -> zbus::Result<()>;
+    fn rename_contact(&self, jid: &str, name: &str) -> zbus::Result<()>;
+    fn approve_subscription(&self, jid: &str) -> zbus::Result<()>;
+    fn deny_subscription(&self, jid: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn contact_changed(&self, jid: &str, changes: Dict) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn subscription_request(&self, jid: &str) -> zbus::Result<()>;
+}
+
+/// Client side of `net.dunevent.Piopio.Conversation`.
+#[zbus::proxy(
+    interface = "net.dunevent.Piopio.Conversation",
+    default_service = "net.dunevent.Piopio.Daemon"
+)]
+pub trait Conversation {
+    #[zbus(property)]
+    fn peer(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn kind(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn title(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn unread(&self) -> zbus::Result<u32>;
+    #[zbus(property)]
+    fn last_activity(&self) -> zbus::Result<i64>;
+    #[zbus(property)]
+    fn pinned(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn muted(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn encryption(&self) -> zbus::Result<String>;
+
+    /// One page of history, newest last, older than `before_id` ("" = newest).
+    fn get_messages(&self, before_id: &str, limit: u32) -> zbus::Result<Vec<Dict>>;
+
+    /// Sends a message; returns its id.
+    fn send(
+        &self,
+        body: &str,
+        options: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<String>;
+
+    /// Clears Unread and tells the contact we have read up to here.
+    fn mark_read(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn message_added(&self, message: Dict) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn message_changed(&self, id: &str, changes: Dict) -> zbus::Result<()>;
 }

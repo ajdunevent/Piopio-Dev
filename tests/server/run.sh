@@ -1,0 +1,47 @@
+#!/bin/sh
+# Starts a throwaway Prosody on 127.0.0.1:15222 with the accounts the tests use
+# (alice, bob, carol and dave @localhost, password "password"), runs the given
+# command, then stops the server.
+#
+#   tests/server/run.sh cargo test -p piopio-daemon --test messaging
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+PIOPIO_TEST_SERVER_DIR=$(mktemp -d)
+export PIOPIO_TEST_SERVER_DIR
+cfg="$here/prosody.cfg.lua"
+# prosodyctl only checks this for files it may hand to the prosody user.
+export USER="${USER:-$(id -un)}"
+mkdir -p "$PIOPIO_TEST_SERVER_DIR/data"
+
+for user in alice bob carol dave; do
+    prosodyctl --config "$cfg" register "$user" localhost password >/dev/null
+done
+
+prosody --config "$cfg" >/dev/null 2>&1 &
+pid=$!
+cleanup() {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    rm -rf "$PIOPIO_TEST_SERVER_DIR"
+}
+trap cleanup EXIT INT TERM
+
+i=0
+until (echo >/dev/tcp/127.0.0.1/15222) 2>/dev/null || nc -z 127.0.0.1 15222 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -gt 100 ]; then
+        echo "Prosody did not start:" >&2
+        cat "$PIOPIO_TEST_SERVER_DIR/prosody.log" >&2 || true
+        exit 1
+    fi
+    sleep 0.1
+done
+
+export PIOPIO_TEST_SERVER=127.0.0.1:15222
+status=0
+"$@" || status=$?
+if [ "$status" -ne 0 ] && [ -n "${PIOPIO_SHOW_SERVER_LOG:-}" ]; then
+    tail -n 200 "$PIOPIO_TEST_SERVER_DIR/prosody.log" >&2
+fi
+exit "$status"
