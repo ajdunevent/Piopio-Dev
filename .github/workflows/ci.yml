@@ -113,13 +113,16 @@ jobs:
         run: |
           rm -rf /host/android/* /host/dotnet/* /host/toolcache/*
           df -h /
-      # The image's preinstalled runtime can't be updated in place
-      # ("Invalid cross-device link" across the container's layers), so
-      # install the current one fresh.
-      - name: Reinstall the GNOME 51 runtime
+      # The image's preinstalled runtime can't be updated in place: its
+      # directories live in a lower layer of the container's overlay, where
+      # renames fail ("Invalid cross-device link"). A copy lives in the
+      # writable layer, where updates work.
+      - name: Make the Flatpak installation updatable
         run: |
-          flatpak uninstall -y --noninteractive org.gnome.Sdk//51 org.gnome.Platform//51 || true
-          flatpak install -y --noninteractive flathub org.gnome.Sdk//51 org.gnome.Platform//51
+          cp -a /var/lib/flatpak /var/lib/flatpak.copy
+          rm -rf /var/lib/flatpak
+          mv /var/lib/flatpak.copy /var/lib/flatpak
+          flatpak update -y --noninteractive
       - uses: actions/checkout@v4
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
