@@ -187,3 +187,33 @@ async fn avatars() {
     assert_eq!(std::fs::read(seen).unwrap(), std::fs::read(own).unwrap());
     let _ = dave_path;
 }
+
+/// A picture set while we were offline (and from someone who doesn't share
+/// presence with us, so no notification comes) shows after reconnecting.
+#[tokio::test]
+async fn avatar_changed_while_offline() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    let ivan = TestDaemon::start().await.unwrap();
+    let judy = TestDaemon::start().await.unwrap();
+    let (_, ivan_account) = ivan.add_local("ivan").await;
+    let (_, judy_account) = judy.add_local("judy").await;
+    let chat = ivan
+        .conversation(ivan_account.start_chat("judy@localhost").await.unwrap())
+        .await;
+    assert_eq!(chat.avatar().await.unwrap(), "");
+
+    ivan_account.set_enabled(false).await.unwrap();
+    judy_account
+        .set_avatar(zbus::zvariant::Fd::from(&picture()))
+        .await
+        .unwrap();
+    ivan_account.set_enabled(true).await.unwrap();
+    wait_for(20, "Judy's picture after reconnecting", || async {
+        let p = chat.avatar().await.unwrap();
+        (!p.is_empty()).then_some(())
+    })
+    .await;
+}

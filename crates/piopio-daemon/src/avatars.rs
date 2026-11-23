@@ -1,4 +1,5 @@
-//! Avatars (XEP-0084): contacts' pictures from PEP, and our own.
+//! Avatars: contacts' pictures from PEP (XEP-0084), or from their vCard
+//! (XEP-0153) when they publish none there, and our own.
 //!
 //! Pictures are scaled down here (to at most 192px) and kept in the data
 //! directory, so the UI only ever loads small files. Conversations show
@@ -20,6 +21,8 @@ use crate::session::{Session, Shared};
 
 pub const METADATA: &str = "urn:xmpp:avatar:metadata";
 pub const DATA: &str = "urn:xmpp:avatar:data";
+const VCARD: &str = "vcard-temp";
+const VCARD_UPDATE: &str = "vcard-temp:x:update";
 /// Pictures larger than this are not fetched.
 const MAX_BYTES: usize = 1024 * 1024;
 const SIZE: u32 = 192;
@@ -148,26 +151,166 @@ pub fn refresh(session: &Session, jid: BareJid) {
             .await
             .ok()
             .flatten()
-            .is_some()
+            .is_some_and(|(h, _)| !h.is_empty())
         {
             return;
         }
-        let wanted = crate::pep::fetch_item(&session, &jid, METADATA)
-            .await
-            .and_then(|m| {
-                let i = m.children().find(|c| c.is("info", METADATA))?;
-                Some((
-                    i.attr("id")?.to_owned(),
-                    i.attr("bytes").and_then(|b| b.parse().ok()),
-                ))
-            });
-        if wanted.is_some() {
-            update(&session, &jid, wanted).await;
+        check(&session, &jid).await;
+    });
+}
+
+/// After connecting: checks the picture of everyone we have a chat with or
+/// in the roster. PEP notifications only come from contacts who share
+/// their presence with us, and only while we're online, so pictures
+/// changed meanwhile or kept only in a vCard would otherwise never show.
+pub async fn online(session: &Session) {
+    let mut peers = std::collections::BTreeSet::new();
+    if let Ok(rows) = session.store.conversations(session.account_id).await {
+        peers.extend(
+            rows.into_iter()
+                .filter(|r| r.kind == "chat")
+                .map(|r| r.peer),
+        );
+    }
+    if let Ok(rows) = session.store.contacts(session.account_id).await {
+        peers.extend(rows.into_iter().map(|r| r.jid));
+    }
+    let session = session.clone();
+    tokio::spawn(async move {
+        for peer in peers {
+            if !session.is_online() {
+                return;
+            }
+            if let Ok(jid) = peer.parse::<BareJid>()
+                && jid != session.jid
+            {
+                check(&session, &jid).await;
+            }
         }
     });
 }
 
-/// The stored picture of `jid`, or "".
+/// Looks for `jid`'s picture: in PEP first, in the vCard when PEP has
+/// nothing at all (an empty PEP item means they removed it).
+async fn check(session: &Session, jid: &BareJid) {
+    match crate::pep::fetch_item(session, jid, METADATA).await {
+        Some(metadata) => {
+            let wanted = metadata
+                .children()
+                .find(|c| c.is("info", METADATA) && c.attr("url").is_none())
+                .and_then(|i| {
+                    Some((
+                        i.attr("id")?.to_owned(),
+                        i.attr("bytes").and_then(|b| b.parse().ok()),
+                    ))
+                });
+            update(session, jid, wanted).await;
+        }
+        None => from_vcard(session, jid, None).await,
+    }
+}
+
+/// A presence's vCard picture hash (XEP-0153): fetches the vCard when the
+/// picture differs from the one we have. Pictures from PEP win, so this
+/// only replaces one that also came from a vCard or none at all.
+pub fn presence(session: &Session, presence: &tokio_xmpp::parsers::presence::Presence) {
+    let Some(from) = presence.from.as_ref() else {
+        return;
+    };
+    let Some(hash) = presence
+        .payloads
+        .iter()
+        .find(|p| p.is("x", VCARD_UPDATE))
+        .and_then(|x| x.get_child("photo", VCARD_UPDATE))
+        .map(|p| p.text().trim().to_lowercase())
+        .filter(|h| !h.is_empty())
+    else {
+        return;
+    };
+    let jid = from.to_bare();
+    if jid == session.jid {
+        return;
+    }
+    let session = session.clone();
+    tokio::spawn(async move {
+        let current = session
+            .store
+            .avatar(session.account_id, jid.to_string())
+            .await
+            .ok()
+            .flatten();
+        if current.as_ref().is_some_and(|(h, _)| *h == hash) {
+            return;
+        }
+        // Someone with a PEP picture: that one stays.
+        if current.is_some_and(|(h, _)| !h.is_empty())
+            && crate::pep::fetch_item(&session, &jid, METADATA)
+                .await
+                .is_some_and(|m| m.get_child("info", METADATA).is_some())
+        {
+            return;
+        }
+        from_vcard(&session, &jid, Some(hash)).await;
+    });
+}
+
+/// Takes the picture from `jid`'s vCard (XEP-0054), if it has one.
+async fn from_vcard(session: &Session, jid: &BareJid, expected: Option<String>) {
+    let query = Element::builder("vCard", VCARD).build();
+    let to = Some(Jid::from(jid.clone()));
+    let reply = match session.iq(crate::pep::get(to, query)).await {
+        Ok(Some(reply)) => reply,
+        _ => return,
+    };
+    let photo = reply.get_child("PHOTO", VCARD);
+    let raw = photo
+        .and_then(|p| p.get_child("BINVAL", VCARD))
+        .and_then(|b| {
+            B64.decode(b.text().split_whitespace().collect::<String>())
+                .ok()
+        })
+        .filter(|raw| !raw.is_empty() && raw.len() <= MAX_BYTES);
+    let current = session
+        .store
+        .avatar(session.account_id, jid.to_string())
+        .await
+        .ok()
+        .flatten();
+    let Some(raw) = raw else {
+        // No picture there (and none in PEP): forget an old one.
+        if expected.is_none() && current.is_some_and(|(h, _)| !h.is_empty()) {
+            let _ = session
+                .store
+                .set_avatar(
+                    session.account_id,
+                    jid.to_string(),
+                    String::new(),
+                    String::new(),
+                )
+                .await;
+            changed(session, jid, "").await;
+        }
+        return;
+    };
+    let hash = hex(&Sha1::digest(&raw));
+    if current.as_ref().is_some_and(|(h, _)| *h == hash) {
+        return;
+    }
+    if expected.as_ref().is_some_and(|e| *e != hash) {
+        tracing::debug!(%jid, "vCard picture doesn't match the presence's hash");
+    }
+    let name = hash.clone();
+    let Ok(Ok((path, _))) = tokio::task::spawn_blocking(move || save_scaled(&raw, &name)).await
+    else {
+        return;
+    };
+    let _ = session
+        .store
+        .set_avatar(session.account_id, jid.to_string(), hash, path.clone())
+        .await;
+    changed(session, jid, &path).await;
+}
+
 pub async fn path_of(session: &Shared, jid: &str) -> String {
     session
         .store

@@ -338,6 +338,7 @@ async fn came_online(shared: Session, features: StreamFeatures) {
     crate::omemo::online(&shared).await;
     crate::rooms::online(&shared).await;
     messages::catch_up(&shared).await;
+    crate::avatars::online(&shared).await;
 }
 
 /// Announces our current presence to the server (and so to our contacts).
@@ -396,6 +397,7 @@ async fn handle_stanza(shared: &Session, stanza: Stanza) {
         Stanza::Message(message) => messages::incoming(shared, message).await,
         Stanza::Presence(presence) => {
             if !crate::rooms::presence(shared, &presence).await {
+                crate::avatars::presence(shared, &presence);
                 roster::presence(shared, presence).await
             }
         }
