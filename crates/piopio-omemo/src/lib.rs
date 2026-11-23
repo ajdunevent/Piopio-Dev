@@ -5,12 +5,15 @@
 //! [`Session`]s in their own storage (both serialize with serde) and move the
 //! bytes over XMPP themselves.
 //!
-//! The wire format is legacy OMEMO, `eu.siacs.conversations.axolotl` (0.3.0),
+//! The crate root is legacy OMEMO; [`v2`] is OMEMO 2 (`urn:xmpp:omemo:2`).
+//!
+//! The legacy wire format is `eu.siacs.conversations.axolotl` (0.3.0),
 //! which Conversations and Dino speak: libsignal's X3DH and Double Ratchet,
 //! Curve25519 identity keys with XEdDSA signatures, AES-256-CBC with a
 //! truncated HMAC per ratchet message, and AES-128-GCM for the payload.
 
 mod proto;
+pub mod v2;
 pub mod xeddsa;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -149,7 +152,7 @@ pub struct Bundle {
     pub pre_keys: Vec<(u32, [u8; 32])>,
 }
 
-mod sig {
+pub(crate) mod sig {
     use serde::{Deserialize, Deserializer, Serializer};
     pub fn serialize<S: Serializer>(v: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(v)

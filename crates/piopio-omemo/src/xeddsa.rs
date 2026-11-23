@@ -70,6 +70,34 @@ fn verify_with_sign(public: &[u8; 32], message: &[u8], signature: &[u8; 64], sig
     let Some(a) = MontgomeryPoint(*public).to_edwards(sign) else {
         return false;
     };
+    verify_point(&a, message, signature)
+}
+
+/// Verifies a standard Ed25519 signature by an Ed25519 public key (OMEMO 2
+/// identity keys). XEdDSA signatures from [`sign`] verify here against
+/// [`edwards_public`] of the signer's Curve25519 key.
+pub fn verify_ed(public: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
+    let Some(a) = CompressedEdwardsY(*public).decompress() else {
+        return false;
+    };
+    verify_point(&a, message, signature)
+}
+
+/// The Ed25519 form (sign bit 0) of a Curve25519 public key.
+pub fn edwards_public(public: &[u8; 32]) -> Option<[u8; 32]> {
+    MontgomeryPoint(*public)
+        .to_edwards(0)
+        .map(|e| e.compress().0)
+}
+
+/// The Curve25519 form of an Ed25519 public key.
+pub fn montgomery_public(public: &[u8; 32]) -> Option<[u8; 32]> {
+    CompressedEdwardsY(*public)
+        .decompress()
+        .map(|e| e.to_montgomery().0)
+}
+
+fn verify_point(a: &curve25519_dalek::EdwardsPoint, message: &[u8], signature: &[u8; 64]) -> bool {
     let mut r_bytes = [0u8; 32];
     r_bytes.copy_from_slice(&signature[..32]);
     let mut s_bytes = [0u8; 32];
@@ -89,7 +117,7 @@ fn verify_with_sign(public: &[u8; 32], message: &[u8], signature: &[u8; 64], sig
     h.update(a_compressed.0);
     h.update(message);
     let h = Scalar::from_bytes_mod_order_wide(&h.finalize().into());
-    let check = curve25519_dalek::EdwardsPoint::vartime_double_scalar_mul_basepoint(&h, &(-a), &s);
+    let check = curve25519_dalek::EdwardsPoint::vartime_double_scalar_mul_basepoint(&h, &(-*a), &s);
     check.compress().0 == r_bytes
 }
 
@@ -109,6 +137,9 @@ mod tests {
             let mut bad = sig;
             bad[5] ^= 1;
             assert!(!verify(&public, b"hello", &bad));
+            let ed = edwards_public(&public).unwrap();
+            assert!(verify_ed(&ed, b"hello", &sig));
+            assert_eq!(montgomery_public(&ed).unwrap(), public);
         }
     }
 }
