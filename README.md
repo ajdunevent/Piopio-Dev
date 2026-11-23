@@ -26,21 +26,31 @@ difference, and OMEMO is on from the first message.
   markers, typing notifications, Carbons for your other devices, and
   catch-up from the server archive (MAM) after being offline; duplicates are
   dropped.
-- **OMEMO** (`eu.siacs.conversations.axolotl`, what Conversations, Dino,
-  Gajim, Monal and Converse.js speak): on by default whenever the other
-  side has it, implemented in pure Rust in `piopio-omemo` and checked in CI
-  against python-oldmemo in both directions. Blind Trust Before
-  Verification, fingerprints and per-device trust in the Encryption dialog.
-  Messages are never sent in the clear to someone who uses OMEMO.
+- **OMEMO**, both versions, implemented in pure Rust in `piopio-omemo` and
+  checked in CI against python-oldmemo and python-twomemo in both
+  directions. The original version (`eu.siacs.conversations.axolotl`, what
+  Conversations, Dino, Gajim, Monal and Converse.js speak) is on by default
+  whenever the other side has it. OMEMO 2 (`urn:xmpp:omemo:2`, with
+  stanza content encryption) is used in a chat when every device on both
+  sides reads it, and never mixed with the original in one chat. Blind
+  Trust Before Verification, fingerprints and per-device trust in the
+  Encryption dialog. Messages are never sent in the clear to someone who
+  uses OMEMO.
 - **Replies, corrections, reactions, deleting for everyone** (XEP-0461,
   0308, 0444, 0424), from a message's menu (right click or long press).
 - **Group chats:** joining (Ctrl+J), history from the room's archive,
   occupants, bookmarks shared with your other devices, leaving and
-  rejoining. Not encrypted yet.
+  rejoining, invitations. Private rooms (members-only, non-anonymous) can
+  be created from the Join dialog and are OMEMO encrypted.
 - **Files:** sharing through the server's upload service, encrypted
   (`aesgcm://`) in OMEMO chats; pictures download by themselves and get
   thumbnails made by the daemon.
 - **Avatars:** contacts' pictures, and setting your own in Accounts.
+- **Calls:** voice and video calls with anyone whose client speaks Jingle
+  RTP (XEP-0167) with ICE and DTLS-SRTP, rung through Jingle Message
+  Initiation (XEP-0353) so every device rings. The daemon does the
+  signalling; the media (Opus, VP8) runs in the window through GStreamer's
+  webrtcbin, in `piopio-call`.
 - **Background:** the daemon runs with no window, asks the Background portal
   for autostart inside Flatpak, and shows notifications through the
   Notification portal while no window is open (in group chats only when
@@ -49,7 +59,7 @@ difference, and OMEMO is on from the first message.
   delivery ticks, Add Account, New Chat, Join Group Chat, Accounts; adapts
   down to 360px.
 
-Not yet: OMEMO in group chats, OMEMO 2, Jingle file transfer, calls,
+Not yet: OMEMO 2 in group chats, Jingle file transfer, group calls,
 Client State Indication (blocked on tokio-xmpp sending nonzas), direct TLS
 and SASL2/FAST.
 
@@ -60,7 +70,8 @@ and SASL2/FAST.
 | `crates/piopio-daemon` | The background service (`net.dunevent.Piopio.Daemon`) |
 | `crates/piopio` | The UI (`net.dunevent.Piopio`) |
 | `crates/piopio-dbus` | Bus names, object paths and client proxies shared by both |
-| `crates/piopio-omemo` | OMEMO (X3DH, Double Ratchet, XEdDSA) in pure Rust, sans I/O |
+| `crates/piopio-omemo` | OMEMO and OMEMO 2 (X3DH, Double Ratchet, XEdDSA) in pure Rust, sans I/O |
+| `crates/piopio-call` | Call media: GStreamer webrtcbin, run by the UI |
 | `tests/server` | A throwaway local Prosody for the end-to-end tests |
 | `data/` | Desktop file, metainfo, D-Bus service file, icons |
 | `build-aux/` | Flatpak manifest for the GNOME 51 runtime |
