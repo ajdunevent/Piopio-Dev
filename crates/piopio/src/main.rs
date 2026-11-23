@@ -169,6 +169,36 @@ fn main() -> glib::ExitCode {
             Some(glib::VariantTy::STRING),
         );
     }
+    {
+        // Status for every account: available, away or do not disturb.
+        let status = gio::SimpleAction::new_stateful(
+            "status",
+            Some(glib::VariantTy::STRING),
+            &"available".to_variant(),
+        );
+        let ensure = ensure.clone();
+        let app2 = app.clone();
+        status.connect_change_state(move |a, value| {
+            let Some(show) = value.and_then(|v| v.get::<String>()) else {
+                return;
+            };
+            a.set_state(&show.to_variant());
+            let w = ensure(&app2);
+            let accounts: Vec<_> = w
+                .accounts
+                .borrow()
+                .iter()
+                .map(|i| i.proxy.clone())
+                .collect();
+            glib::spawn_future_local(async move {
+                for proxy in accounts {
+                    let show = show.clone();
+                    let _ = client::run(async move { proxy.set_presence((&show, "")).await }).await;
+                }
+            });
+        });
+        app.add_action(&status);
+    }
     app.set_accels_for_action("app.new-chat", &["<Control>n"]);
     app.set_accels_for_action("app.join-room", &["<Control>j"]);
     app.set_accels_for_action("window.close", &["<Control>w"]);

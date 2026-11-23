@@ -18,8 +18,25 @@ pub async fn message(session: &Session, conversation: &OwnedObjectPath, row: &Me
     if muted(session, conversation).await {
         return;
     }
-    let title = crate::roster::display_name(session, &row.sender).await;
-    let body: String = row.body.chars().take(200).collect();
+    // Do not disturb means it.
+    if session.presence.lock().await.0 == "dnd" {
+        return;
+    }
+    let title = match row.sender.split_once('/') {
+        // A group chat: "nick in room".
+        Some((room, nick)) => {
+            let room = room.split('@').next().unwrap_or(room);
+            format!("{nick} in {room}")
+        }
+        None => crate::roster::display_name(session, &row.sender).await,
+    };
+    let body: String = if row.encryption == "omemo-failed" {
+        "Encrypted message".to_owned()
+    } else if crate::files::is_file_link(&row.body) {
+        "Sent a file".to_owned()
+    } else {
+        row.body.chars().take(200).collect()
+    };
     let mut notification: HashMap<&str, Value<'_>> = HashMap::new();
     notification.insert("title", Value::from(title));
     notification.insert("body", Value::from(body));

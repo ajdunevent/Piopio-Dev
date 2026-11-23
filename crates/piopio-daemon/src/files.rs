@@ -175,6 +175,12 @@ pub fn shared_link(message: &Message, body: &str) -> Option<String> {
     (oob.as_deref() == Some(body) && allowed(body)).then(|| body.to_owned())
 }
 
+/// Whether a body is only an encrypted file's link (useless as a preview).
+pub fn is_file_link(body: &str) -> bool {
+    let b = body.trim();
+    !b.contains(char::is_whitespace) && b.starts_with("aesgcm://")
+}
+
 pub fn oob_element(url: &str) -> Element {
     Element::builder("x", OOB)
         .append(Element::builder("url", OOB).append(url).build())

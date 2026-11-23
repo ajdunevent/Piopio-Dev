@@ -96,6 +96,11 @@ impl Window {
         sidebar_stack.set_visible_child_name("loading");
 
         let menu = gtk::gio::Menu::new();
+        let status = gtk::gio::Menu::new();
+        status.append(Some("_Available"), Some("app.status::available"));
+        status.append(Some("A_way"), Some("app.status::away"));
+        status.append(Some("_Do Not Disturb"), Some("app.status::dnd"));
+        menu.append_section(None, &status);
         menu.append(Some("_Join Group Chat…"), Some("app.join-room"));
         menu.append(Some("_Accounts"), Some("app.accounts"));
         menu.append(Some("Add _Account…"), Some("app.add-account"));
