@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, anyhow};
-use gstreamer as gst;
+pub use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_sdp as gst_sdp;
 use gstreamer_webrtc as gst_webrtc;
@@ -30,6 +30,9 @@ pub struct Media {
     pub audio_sink: String,
     pub video: bool,
     pub video_source: String,
+    /// The element the other side's video goes to (named "video"); the
+    /// UI takes the paintable from gtk4paintablesink.
+    pub video_sink: String,
 }
 
 impl Default for Media {
@@ -39,6 +42,7 @@ impl Default for Media {
             audio_sink: "autoaudiosink".into(),
             video: false,
             video_source: "autovideosrc".into(),
+            video_sink: "gtk4paintablesink".into(),
         }
     }
 }
@@ -261,7 +265,7 @@ impl Call {
         let pipeline = self.pipeline.clone();
         let events = self.events.clone();
         let sink_description = if video {
-            "videoconvert ! gtk4paintablesink name=video".to_owned()
+            format!("videoconvert ! {} name=video", self.media.video_sink)
         } else {
             format!("audioconvert ! audioresample ! {}", self.media.audio_sink)
         };

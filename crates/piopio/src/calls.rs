@@ -30,6 +30,10 @@ pub struct CallView {
     status: gtk::Label,
     answer: gtk::Button,
     mute: gtk::ToggleButton,
+    /// The other side's video, in place of their avatar once it arrives.
+    picture: gtk::Picture,
+    avatar: adw::Avatar,
+    video: bool,
     media: RefCell<Option<Arc<piopio_call::Call>>>,
     started: Cell<Option<std::time::Instant>>,
     ended: Cell<bool>,
@@ -44,28 +48,31 @@ pub async fn open(window: &Rc<Window>, path: OwnedObjectPath) {
         let peer = proxy.peer().await?;
         let direction = proxy.direction().await?;
         let state = proxy.state().await?;
-        Ok::<_, zbus::Error>((proxy, peer, direction, state))
+        let video = proxy.video().await?;
+        Ok::<_, zbus::Error>((proxy, peer, direction, state, video))
     })
     .await;
-    let Ok((proxy, peer, direction, state)) = loaded else {
+    let Ok((proxy, peer, direction, state, video)) = loaded else {
         return;
     };
     if state == "ended" {
         return;
     }
-    let view = CallView::new(
-        window,
-        proxy,
-        &peer,
-        direction == "incoming" && state == "ringing",
-    );
+    let ringing = direction == "incoming" && state == "ringing";
+    let view = CallView::new(window, proxy, &peer, ringing, video);
     if direction == "outgoing" {
         view.start_media(Role::Offerer);
     }
 }
 
 impl CallView {
-    fn new(window: &Rc<Window>, proxy: CallProxy<'static>, peer: &str, ringing: bool) -> Rc<Self> {
+    fn new(
+        window: &Rc<Window>,
+        proxy: CallProxy<'static>,
+        peer: &str,
+        ringing: bool,
+        video: bool,
+    ) -> Rc<Self> {
         let avatar = adw::Avatar::new(96, Some(peer), true);
         let name = gtk::Label::builder()
             .label(peer)
@@ -73,10 +80,10 @@ impl CallView {
             .wrap(true)
             .build();
         let status = gtk::Label::builder()
-            .label(if ringing {
-                "Incoming call"
-            } else {
-                "Calling…"
+            .label(match (ringing, video) {
+                (true, true) => "Incoming video call",
+                (true, false) => "Incoming call",
+                _ => "Calling…",
             })
             .css_classes(["dim-label"])
             .build();
@@ -112,14 +119,21 @@ impl CallView {
             .margin_start(24)
             .margin_end(24)
             .build();
+        let picture = gtk::Picture::builder()
+            .visible(false)
+            .height_request(240)
+            .content_fit(gtk::ContentFit::Contain)
+            .css_classes(["call-video"])
+            .build();
         content.append(&avatar);
+        content.append(&picture);
         content.append(&name);
         content.append(&status);
         content.append(&gtk::Box::builder().height_request(24).build());
         content.append(&buttons);
         let dialog = adw::Dialog::builder()
             .title("Call")
-            .content_width(360)
+            .content_width(if video { 560 } else { 360 })
             .can_close(false)
             .child(&content)
             .build();
@@ -130,6 +144,9 @@ impl CallView {
             status,
             answer: answer.clone(),
             mute: mute.clone(),
+            picture,
+            avatar: avatar.clone(),
+            video,
             media: RefCell::default(),
             started: Cell::new(None),
             ended: Cell::new(false),
@@ -276,7 +293,11 @@ impl CallView {
     /// Starts the media, wiring its events to the daemon.
     fn start_media(self: &Rc<Self>, role: Role) {
         let (tx, rx) = async_channel::unbounded::<Event>();
-        let media = piopio_call::Call::new(role, Media::default(), None, &[], move |e| {
+        let wanted = Media {
+            video: self.video,
+            ..Media::default()
+        };
+        let media = piopio_call::Call::new(role, wanted, None, &[], move |e| {
             let _ = tx.send_blocking(e);
         });
         let media = match media {
@@ -315,6 +336,13 @@ impl CallView {
                     Event::Connection(s) if s == "failed" => {
                         view.status.set_label("The connection failed");
                         let _ = run(async move { proxy.hangup().await }).await;
+                    }
+                    Event::RemoteVideo(sink) => {
+                        use piopio_call::gst::prelude::ObjectExt;
+                        let paintable = sink.property::<gtk::gdk::Paintable>("paintable");
+                        view.picture.set_paintable(Some(&paintable));
+                        view.picture.set_visible(true);
+                        view.avatar.set_visible(false);
                     }
                     Event::Error(e) => {
                         view.status.set_label(&e);

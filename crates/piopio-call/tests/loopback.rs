@@ -1,22 +1,33 @@
 //! Two peer connections in one process, wired to each other directly:
 //! offer, answer and candidates cross over, ICE connects on the loopback
-//! interface, and Opus audio arrives on both sides.
+//! interface, and Opus audio (and VP8 video) arrives on both sides.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use piopio_call::{Call, Event, Media, Role};
 
-fn test_media() -> Media {
+fn test_media(video: bool) -> Media {
     Media {
         audio_source: "audiotestsrc is-live=true wave=sine".into(),
         audio_sink: "fakesink sync=false".into(),
-        ..Default::default()
+        video,
+        video_source: "videotestsrc is-live=true".into(),
+        video_sink: "fakesink sync=false".into(),
     }
 }
 
 #[test]
 fn two_peers_talk() {
+    talk(false);
+}
+
+#[test]
+fn two_peers_see_each_other() {
+    talk(true);
+}
+
+fn talk(video: bool) {
     if piopio_call::check().is_err() {
         eprintln!("GStreamer WebRTC elements missing; skipping");
         return;
@@ -25,11 +36,11 @@ fn two_peers_talk() {
     let (b_tx, b_rx) = mpsc::channel::<Event>();
     let a_tx = std::sync::Mutex::new(a_tx);
     let b_tx = std::sync::Mutex::new(b_tx);
-    let alice = Call::new(Role::Offerer, test_media(), None, &[], move |e| {
+    let alice = Call::new(Role::Offerer, test_media(video), None, &[], move |e| {
         let _ = a_tx.lock().unwrap().send(e);
     })
     .unwrap();
-    let bob = Call::new(Role::Answerer, test_media(), None, &[], move |e| {
+    let bob = Call::new(Role::Answerer, test_media(video), None, &[], move |e| {
         let _ = b_tx.lock().unwrap().send(e);
     })
     .unwrap();
@@ -37,8 +48,14 @@ fn two_peers_talk() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let (mut alice_audio, mut bob_audio) = (false, false);
     let (mut alice_connected, mut bob_connected) = (false, false);
+    let (mut alice_video, mut bob_video) = (!video, !video);
     while Instant::now() < deadline
-        && !(alice_audio && bob_audio && alice_connected && bob_connected)
+        && !(alice_audio
+            && bob_audio
+            && alice_connected
+            && bob_connected
+            && alice_video
+            && bob_video)
     {
         while let Ok(e) = a_rx.try_recv() {
             match e {
@@ -53,6 +70,7 @@ fn two_peers_talk() {
                     alice_connected = true
                 }
                 Event::AudioFlowing => alice_audio = true,
+                Event::RemoteVideo(_) => alice_video = true,
                 Event::Error(e) => panic!("alice: {e}"),
                 _ => {}
             }
@@ -70,6 +88,7 @@ fn two_peers_talk() {
                     bob_connected = true
                 }
                 Event::AudioFlowing => bob_audio = true,
+                Event::RemoteVideo(_) => bob_video = true,
                 Event::Error(e) => panic!("bob: {e}"),
                 _ => {}
             }
@@ -78,6 +97,7 @@ fn two_peers_talk() {
     }
     assert!(alice_connected && bob_connected, "ICE connected");
     assert!(alice_audio && bob_audio, "audio both ways");
+    assert!(alice_video && bob_video, "video both ways");
     alice.set_muted(true);
     alice.hangup();
     bob.hangup();
