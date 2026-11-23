@@ -161,7 +161,7 @@ async fn contacts_chat_receipts_and_markers() {
     let messages = &messages[messages.len() - 2..];
     assert_eq!(text(&messages[0], "body"), "Hello Bob");
     assert_eq!(text(&messages[1], "body"), "Hi Alice");
-    for m in &messages {
+    for m in messages {
         assert_eq!(text(m, "encryption"), "omemo", "{m:?}");
     }
     assert_eq!(alice_chat.encryption().await.unwrap(), "omemo");
