@@ -12,7 +12,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use adw::{gdk, glib, gtk};
 use futures_util::StreamExt;
-use piopio_dbus::{ConversationProxy, Dict};
+use piopio_dbus::{ConversationProxy, Dict, RoomProxy};
 use zbus::zvariant::{OwnedValue, Value};
 
 use crate::client::{self, run};
@@ -41,6 +41,12 @@ pub struct ChatPage {
     window: std::rc::Weak<Window>,
     own_jid: String,
     lock: gtk::Button,
+    title: adw::WindowTitle,
+    /// Who is in a group chat, and leaving or rejoining it.
+    people: gtk::MenuButton,
+    is_room: Cell<bool>,
+    /// Who we are here: our JID, or room@service/nick in a group chat.
+    me: RefCell<String>,
     messages: gtk::ListBox,
     scroller: gtk::ScrolledWindow,
     entry: gtk::Entry,
@@ -66,8 +72,14 @@ impl ChatPage {
             .icon_name("channel-insecure-symbolic")
             .tooltip_text("Not Encrypted")
             .build();
+        let people = gtk::MenuButton::builder()
+            .icon_name("system-users-symbolic")
+            .tooltip_text("People")
+            .visible(false)
+            .build();
         let header = adw::HeaderBar::builder().title_widget(&title).build();
         header.pack_end(&lock);
+        header.pack_end(&people);
 
         let messages = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -145,12 +157,17 @@ impl ChatPage {
         view.set_bottom_bar_style(adw::ToolbarStyle::Raised);
         let page = adw::NavigationPage::new(&view, "Chat");
 
+        let me = own_jid.clone();
         let this = Rc::new(Self {
             page,
             proxy: proxy.clone(),
             window: Rc::downgrade(window),
             own_jid,
             lock: lock.clone(),
+            title: title.clone(),
+            people,
+            is_room: Cell::new(false),
+            me: RefCell::new(me),
             messages,
             scroller,
             entry: entry.clone(),
@@ -234,14 +251,23 @@ impl ChatPage {
         glib::spawn_future_local(async move {
             let Some(this) = weak.upgrade() else { return };
             let proxy = this.proxy.clone();
-            if let Ok((name, peer)) = run(async move {
-                Ok::<_, zbus::Error>((proxy.title().await?, proxy.peer().await?))
+            if let Ok((name, peer, kind)) = run(async move {
+                Ok::<_, zbus::Error>((
+                    proxy.title().await?,
+                    proxy.peer().await?,
+                    proxy.kind().await?,
+                ))
             })
             .await
             {
                 title.set_title(&name);
                 title.set_subtitle(if name == peer { "" } else { &peer });
                 this.page.set_title(&name);
+                if kind == "room" {
+                    this.is_room.set(true);
+                    this.lock.set_visible(false);
+                    this.setup_room().await;
+                }
             }
             this.follow_encryption();
             this.load_older().await;
@@ -287,6 +313,151 @@ impl ChatPage {
                 } else {
                     this.update(&id, dict);
                 }
+            }
+        });
+    }
+
+    fn room_jid(&self) -> Result<String, ()> {
+        self.proxy
+            .cached_peer()
+            .ok()
+            .flatten()
+            .ok_or(())
+    }
+
+    /// The group chat parts: subject or state under the title, and the
+    /// people popover with Leave or Join.
+    async fn setup_room(self: &Rc<Self>) {
+        let Ok(bus) = client::bus().await else { return };
+        let path = self.proxy.inner().path().to_owned();
+        let Ok(room) = run(async move { RoomProxy::builder(&bus).path(path)?.build().await }).await
+        else {
+            return;
+        };
+        self.people.set_visible(true);
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
+        let leave = gtk::Button::builder()
+            .label("Leave")
+            .css_classes(["destructive-action"])
+            .build();
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_top(6)
+            .margin_bottom(6)
+            .margin_start(6)
+            .margin_end(6)
+            .width_request(240)
+            .build();
+        content.append(
+            &gtk::ScrolledWindow::builder()
+                .child(&list)
+                .propagate_natural_height(true)
+                .max_content_height(360)
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .build(),
+        );
+        content.append(&leave);
+        self.people
+            .set_popover(Some(&gtk::Popover::builder().child(&content).build()));
+
+        let state: Rc<RefCell<String>> = Rc::default();
+        {
+            let (room, state, window) = (room.clone(), state.clone(), self.window.clone());
+            leave.connect_clicked(move |_| {
+                let (room, joined, window) =
+                    (room.clone(), *state.borrow() == "joined", window.clone());
+                glib::spawn_future_local(async move {
+                    let result = run(async move {
+                        if joined {
+                            room.leave().await
+                        } else {
+                            room.join("", "").await
+                        }
+                    })
+                    .await;
+                    if let (Err(e), Some(w)) = (result, window.upgrade()) {
+                        w.toast(&client::explain(&e));
+                    }
+                });
+            });
+        }
+
+        // Anything changing: redraw the subtitle, the list and the button.
+        let events = {
+            let room = room.clone();
+            client::forward(move || async move {
+                let occupants = room.receive_occupants_changed().await.ok()?;
+                let state = room.receive_state_changed().await;
+                let subject = room.receive_subject_changed().await;
+                Some(
+                    futures_util::stream::once(async {}).chain(futures_util::stream::select(
+                        occupants.map(|_| ()),
+                        futures_util::stream::select(state.map(|_| ()), subject.map(|_| ())),
+                    )),
+                )
+            })
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while events.recv().await.is_ok() {
+                let Some(this) = weak.upgrade() else { break };
+                let r = room.clone();
+                let Ok((now, subject, error, occupants, nick)) = run(async move {
+                    Ok::<_, zbus::Error>((
+                        r.state().await?,
+                        r.subject().await?,
+                        r.error().await?,
+                        r.get_occupants().await?,
+                        r.nick().await?,
+                    ))
+                })
+                .await
+                else {
+                    continue;
+                };
+                if let Ok(room_jid) = this.room_jid() {
+                    *this.me.borrow_mut() = format!("{room_jid}/{nick}");
+                }
+                this.title.set_subtitle(&match now.as_str() {
+                    "joined" => subject.lines().next().unwrap_or("").to_owned(),
+                    "joining" => "Joining…".to_owned(),
+                    "error" => error,
+                    _ => "You left this group chat".to_owned(),
+                });
+                leave.set_label(if now == "joined" { "Leave" } else { "Join" });
+                if now == "joined" {
+                    leave.add_css_class("destructive-action");
+                    leave.remove_css_class("suggested-action");
+                } else {
+                    leave.add_css_class("suggested-action");
+                    leave.remove_css_class("destructive-action");
+                }
+                this.people
+                    .set_tooltip_text(Some(&format!("{} People", occupants.len())));
+                while let Some(child) = list.first_child() {
+                    list.remove(&child);
+                }
+                for o in &occupants {
+                    let row = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&text(o, "nick")).as_str())
+                        .subtitle(glib::markup_escape_text(&text(o, "jid")).as_str())
+                        .build();
+                    let role = text(o, "affiliation");
+                    if role == "owner" || role == "admin" {
+                        row.add_suffix(
+                            &gtk::Label::builder()
+                                .label(if role == "owner" { "Owner" } else { "Admin" })
+                                .css_classes(["caption", "dim-label"])
+                                .build(),
+                        );
+                    }
+                    list.append(&row);
+                }
+                *state.borrow_mut() = now;
             }
         });
     }
@@ -400,9 +571,25 @@ impl ChatPage {
             .css_classes(["bubble", if outgoing { "outgoing" } else { "incoming" }])
             .build();
 
+        if self.is_room.get() && !outgoing {
+            let sender = text(m, "sender");
+            let nick = sender.split_once('/').map(|(_, n)| n).unwrap_or(&sender);
+            bubble.append(
+                &gtk::Label::builder()
+                    .label(nick)
+                    .xalign(0.0)
+                    .css_classes(["sender"])
+                    .build(),
+            );
+        }
+
         let preview = text(m, "reply-preview");
         if !text(m, "reply-to").is_empty() && !retracted {
             let who = text(m, "reply-to-sender");
+            let who = who
+                .split_once('/')
+                .map(|(_, n)| n.to_owned())
+                .unwrap_or(who);
             let who = if who == self.own_jid {
                 "You".to_owned()
             } else {
@@ -515,7 +702,7 @@ impl ChatPage {
         senders.sort();
         for sender in senders {
             for emoji in &all[sender] {
-                let mine = *sender == self.own_jid;
+                let mine = **sender == *self.me.borrow();
                 match counts.iter_mut().find(|(e, _, _)| e == emoji) {
                     Some(entry) => {
                         entry.1 += 1;
@@ -713,7 +900,8 @@ impl ChatPage {
         let Some((_, m)) = self.rows.borrow().get(id).cloned() else {
             return;
         };
-        let mut mine = reactions(&m).remove(&self.own_jid).unwrap_or_default();
+        let me = self.me.borrow().clone();
+        let mut mine = reactions(&m).remove(&me).unwrap_or_default();
         if let Some(i) = mine.iter().position(|e| e == emoji) {
             mine.remove(i);
         } else {

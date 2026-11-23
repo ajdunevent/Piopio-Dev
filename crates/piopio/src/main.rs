@@ -42,6 +42,7 @@ const CSS: &str = r#"
   font-size: smaller; font-weight: bold;
 }
 row.unread .title { font-weight: bold; }
+.bubble .sender { font-weight: bold; font-size: smaller; }
 .undecryptable { font-style: italic; opacity: 0.7; }
 .bubble .quote {
   border-left: 3px solid alpha(currentColor, 0.5);
@@ -132,6 +133,7 @@ fn main() -> glib::ExitCode {
         ("add-account", 1),
         ("accounts", 2),
         ("about", 3),
+        ("join-room", 4),
     ] {
         let ensure = ensure.clone();
         action(
@@ -143,6 +145,7 @@ fn main() -> glib::ExitCode {
                     0 => dialogs::new_chat(&w),
                     1 => dialogs::add_account(&w),
                     2 => dialogs::accounts(&w),
+                    4 => dialogs::join_room(&w),
                     _ => dialogs::about(&w),
                 }
             }),
@@ -164,6 +167,7 @@ fn main() -> glib::ExitCode {
         );
     }
     app.set_accels_for_action("app.new-chat", &["<Control>n"]);
+    app.set_accels_for_action("app.join-room", &["<Control>j"]);
     app.set_accels_for_action("window.close", &["<Control>w"]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
     let quit = gio::SimpleAction::new("quit", None);

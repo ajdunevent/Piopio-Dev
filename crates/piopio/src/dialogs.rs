@@ -167,6 +167,104 @@ async fn log_in(jid: String, password: String) -> Result<OwnedObjectPath, String
     .await
 }
 
+/// Joins a group chat by its address.
+pub fn join_room(window: &Rc<Window>) {
+    let accounts: Vec<Rc<AccountInfo>> = window.accounts.borrow().clone();
+    if accounts.is_empty() {
+        add_account(window);
+        return;
+    }
+    let account_names =
+        gtk::StringList::new(&accounts.iter().map(|a| a.jid.as_str()).collect::<Vec<_>>());
+    let account_row = adw::ComboRow::builder()
+        .title("Account")
+        .model(&account_names)
+        .visible(accounts.len() > 1)
+        .build();
+    let address = adw::EntryRow::builder()
+        .title("Address (room@conference.example.org)")
+        .input_purpose(gtk::InputPurpose::Email)
+        .build();
+    let nick = adw::EntryRow::builder().title("Nickname").build();
+    let password = adw::PasswordEntryRow::builder()
+        .title("Password (if the room has one)")
+        .build();
+    let group = adw::PreferencesGroup::new();
+    group.add(&account_row);
+    group.add(&address);
+    group.add(&nick);
+    group.add(&password);
+    let join = gtk::Button::builder()
+        .label("Join")
+        .css_classes(["pill", "suggested-action"])
+        .halign(gtk::Align::Center)
+        .sensitive(false)
+        .build();
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(18)
+        .margin_top(12)
+        .margin_bottom(24)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    body.append(&group);
+    body.append(&join);
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(&adw::HeaderBar::new());
+    view.set_content(Some(&adw::Clamp::builder().child(&body).build()));
+    let dialog = adw::Dialog::builder()
+        .title("Join Group Chat")
+        .content_width(420)
+        .child(&view)
+        .build();
+
+    address.connect_changed({
+        let join = join.clone();
+        move |a| join.set_sensitive(a.text().contains('@'))
+    });
+    for entry in [&address, &nick] {
+        entry.connect_entry_activated({
+            let join = join.clone();
+            move |_| {
+                if join.is_sensitive() {
+                    join.emit_clicked();
+                }
+            }
+        });
+    }
+    let (w, d) = (window.clone(), dialog.clone());
+    join.connect_clicked(move |button| {
+        let account = accounts[account_row.selected() as usize % accounts.len()].clone();
+        let jid = address.text().trim().to_string();
+        let nick = nick.text().trim().to_string();
+        let password = password.text().to_string();
+        let (w, d, button) = (w.clone(), d.clone(), button.clone());
+        button.set_sensitive(false);
+        glib::spawn_future_local(async move {
+            let proxy = account.proxy.clone();
+            let result = run(async move {
+                let mut options = std::collections::HashMap::new();
+                if !password.is_empty() {
+                    options.insert("password", zbus::zvariant::Value::from(password));
+                }
+                proxy.join_room(&jid, &nick, options).await
+            })
+            .await;
+            button.set_sensitive(true);
+            match result {
+                Ok(path) => {
+                    d.close();
+                    w.add_conversation(path.clone()).await;
+                    w.open_conversation(path.as_str());
+                }
+                Err(e) => w.toast(&client::explain(&e)),
+            }
+        });
+    });
+    dialog.present(Some(&window.window));
+}
+
 /// Starts a chat with a contact or any address.
 pub fn new_chat(window: &Rc<Window>) {
     let accounts: Vec<Rc<AccountInfo>> = window.accounts.borrow().clone();

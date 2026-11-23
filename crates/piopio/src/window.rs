@@ -93,6 +93,7 @@ impl Window {
         sidebar_stack.set_visible_child_name("loading");
 
         let menu = gtk::gio::Menu::new();
+        menu.append(Some("_Join Group Chat…"), Some("app.join-room"));
         menu.append(Some("_Accounts"), Some("app.accounts"));
         menu.append(Some("Add _Account…"), Some("app.add-account"));
         menu.append(Some("_About Piopio"), Some("app.about"));
