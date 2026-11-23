@@ -334,6 +334,53 @@ async fn handle(
         return; // group chats and headlines come later
     }
 
+    // Invitations to group chats: direct (XEP-0249) or through the room.
+    if !outgoing && source == Source::Live {
+        let direct = message
+            .payloads
+            .iter()
+            .find(|p| p.is("x", "jabber:x:conference"))
+            .and_then(|x| {
+                Some((
+                    x.attr("jid")?.to_owned(),
+                    peer.to_string(),
+                    x.attr("reason").unwrap_or("").to_owned(),
+                    x.attr("password").unwrap_or("").to_owned(),
+                ))
+            });
+        let mediated = message
+            .payloads
+            .iter()
+            .find(|p| p.is("x", ns::MUC_USER))
+            .and_then(|x| {
+                let invite = x.get_child("invite", ns::MUC_USER)?;
+                Some((
+                    peer.to_string(),
+                    invite
+                        .attr("from")
+                        .and_then(|f| f.parse::<Jid>().ok())
+                        .map(|j| j.to_bare().to_string())
+                        .unwrap_or_default(),
+                    invite
+                        .get_child("reason", ns::MUC_USER)
+                        .map(|r| r.text())
+                        .unwrap_or_default(),
+                    x.get_child("password", ns::MUC_USER)
+                        .map(|p| p.text())
+                        .unwrap_or_default(),
+                ))
+            });
+        if let Some((room, from, reason, password)) = direct.or(mediated) {
+            if let Ok(emitter) = SignalEmitter::new(&session.bus, session.path.clone()) {
+                let _ = crate::account::AccountObject::room_invitation(
+                    &emitter, &room, &from, &reason, &password,
+                )
+                .await;
+            }
+            return;
+        }
+    }
+
     // Typing notifications (XEP-0085), only as they happen.
     if let Ok(Some(chat_state)) = message.extract_payload::<ChatState>()
         && source == Source::Live
@@ -582,7 +629,8 @@ async fn handle_room(
     }
     let replaces = rich::correction(&message);
     let reply = rich::reply(&message);
-    let Some((_, body)) = message.get_best_body_cloned(vec![]) else {
+    let encrypted = message.extract_payload::<Encrypted>().ok().flatten();
+    let Some((_, plain_body)) = message.get_best_body_cloned(vec![]) else {
         return;
     };
     let origin = message
@@ -609,6 +657,66 @@ async fn handle_room(
     if outgoing && source == Source::Live {
         mark(session, &room, &origin_id, state::RECEIVED).await;
     }
+
+    let (body, encryption) = match encrypted {
+        None => (plain_body, "none"),
+        Some(encrypted) => {
+            if session
+                .store
+                .has_message(conversation, origin_id.clone(), outgoing)
+                .await
+                .unwrap_or(false)
+            {
+                // Ours, or seen before: decrypting again would only fail. Its
+                // archive id may be new, though.
+                if let Some(id) = &server_id {
+                    let new = NewMessage {
+                        origin_id: origin_id.clone(),
+                        server_id: Some(id.clone()),
+                        outgoing,
+                        ..Default::default()
+                    };
+                    let _ = session.store.insert_message(conversation, new).await;
+                }
+                return;
+            }
+            // Who really sent it: from the occupant list, or by whose
+            // device it came from.
+            let real = if outgoing {
+                Some(session.jid.clone())
+            } else {
+                let live = session.rooms.get(room.as_str()).await.unwrap_or_default();
+                let known = live
+                    .occupants
+                    .get(&nick)
+                    .and_then(|o| o.jid.parse::<BareJid>().ok());
+                match known {
+                    Some(j) => Some(j),
+                    None => {
+                        crate::omemo::owner_of_device(session, &live.members, encrypted.header.sid)
+                            .await
+                    }
+                }
+            };
+            let result = match &real {
+                Some(jid) => crate::omemo::decrypt(session, jid, &encrypted).await,
+                None => crate::omemo::Decrypted::Failed("unknown sender".into()),
+            };
+            match result {
+                crate::omemo::Decrypted::Text { body, trusted } => {
+                    (body, if trusted { "omemo" } else { "omemo-untrusted" })
+                }
+                crate::omemo::Decrypted::KeyTransport => return,
+                crate::omemo::Decrypted::Failed(why) => {
+                    if encrypted.payload.is_none() || replaces.is_some() {
+                        return;
+                    }
+                    tracing::info!(%room, "an OMEMO message could not be decrypted: {why}");
+                    (String::new(), "omemo-failed")
+                }
+            }
+        }
+    };
 
     let (body, quote) = rich::strip_fallback(&message, rich::REPLY, &body);
     if let Some(target) = replaces {
@@ -641,7 +749,7 @@ async fn handle_room(
         body,
         timestamp,
         state: state::RECEIVED,
-        encryption: "none",
+        encryption,
         reply_to,
         reply_to_sender,
         reply_preview,
@@ -869,7 +977,22 @@ async fn deliver(
             .with_payload(ChatState::Active);
     }
     message.id = Some(Id(id.to_owned()));
-    let used = match crate::omemo::encrypt(session, peer, wanted, body).await {
+    let outcome = if message.type_ == MessageType::Groupchat {
+        if wanted {
+            let members = session
+                .rooms
+                .get(peer.as_str())
+                .await
+                .map(|l| l.members)
+                .unwrap_or_default();
+            crate::omemo::encrypt_group(session, &members, body).await
+        } else {
+            crate::omemo::Outgoing::Plain
+        }
+    } else {
+        crate::omemo::encrypt(session, peer, wanted, body).await
+    };
+    let used = match outcome {
         crate::omemo::Outgoing::Plain => {
             message.bodies.insert(Lang::default(), body.to_owned());
             "none"
@@ -1019,6 +1142,23 @@ impl ConversationObject {
             .ok()
             .and_then(|cs| cs.into_iter().find(|c| c.jid == self.row.peer))
             .is_some_and(|c| c.subscription == "from" || c.subscription == "both")
+    }
+
+    /// Whether to encrypt what we send now. In one-to-one chats that is
+    /// the setting (whether the peer has OMEMO is decided when sending,
+    /// after fetching their devices); in rooms, the room must be private.
+    async fn wants_encryption(&self) -> bool {
+        if self.is_room() {
+            crate::omemo::conversation_encryption(
+                &self.session,
+                &self.row.peer,
+                self.row.encryption_wanted,
+            )
+            .await
+                == "omemo"
+        } else {
+            self.row.encryption_wanted
+        }
     }
 
     fn is_room(&self) -> bool {
@@ -1329,7 +1469,7 @@ impl ConversationObject {
         let session = self.session.clone();
         let conversation = self.row.id;
         // Group chats are not encrypted yet.
-        let wanted = self.row.encryption_wanted && !self.is_room();
+        let wanted = self.wants_encryption().await;
         let kind = self.message_type();
         let tracked = !self.is_room();
         let message_id = row.id;
@@ -1395,16 +1535,12 @@ impl ConversationObject {
             if n.is_empty() { "file".to_owned() } else { n }
         };
         let mime = crate::files::mime_of(&name).to_owned();
-        let encryption = if self.is_room() {
-            "none"
-        } else {
-            crate::omemo::conversation_encryption(
-                &self.session,
-                &self.row.peer,
-                self.row.encryption_wanted,
-            )
-            .await
-        };
+        let encryption = crate::omemo::conversation_encryption(
+            &self.session,
+            &self.row.peer,
+            self.row.encryption_wanted,
+        )
+        .await;
         let origin_id = new_id();
         let new = NewMessage {
             origin_id: origin_id.clone(),
@@ -1448,9 +1584,13 @@ impl ConversationObject {
         let conversation = self.row.id;
         let kind = self.message_type();
         let tracked = !self.is_room();
-        let wanted = encryption == "omemo";
+        let wanted = self.wants_encryption().await;
         let message_id = row.id;
         tokio::spawn(async move {
+            // Only encrypt the file if the message carrying its key will be.
+            let wanted = wanted
+                && (kind == MessageType::Groupchat
+                    || crate::omemo::peer_uses_omemo(&session, &peer).await);
             let link = crate::files::upload(&session, &name, &mime, data, wanted).await;
             let new_state = match link {
                 Err(e) => {
@@ -1554,11 +1694,12 @@ impl ConversationObject {
             extra.extend(elements);
             wire_body = quoted;
         }
+        let encrypt = self.wants_encryption().await;
         let (state, _) = deliver(
             &self.session,
             &peer,
             self.message_type(),
-            self.row.encryption_wanted && !self.is_room(),
+            encrypt,
             &new_id(),
             &wire_body,
             extra,

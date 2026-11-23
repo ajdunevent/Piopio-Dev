@@ -112,6 +112,16 @@ pub trait Account {
     /// Changes the password on the server, then uses it.
     fn change_password(&self, new: &str) -> zbus::Result<()>;
 
+    /// Someone invited us to a group chat.
+    #[zbus(signal)]
+    fn room_invitation(
+        &self,
+        room: &str,
+        from: &str,
+        reason: &str,
+        password: &str,
+    ) -> zbus::Result<()>;
+
     /// Sets the account's picture from an image file; empty removes it.
     fn set_avatar(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
 
@@ -255,6 +265,13 @@ pub trait Room {
 
     /// Leaves the room; its history stays.
     fn leave(&self) -> zbus::Result<()>;
+
+    /// Invites someone, making them a member of a members-only room.
+    fn invite(&self, jid: &str, reason: &str) -> zbus::Result<()>;
+
+    /// Members-only and non-anonymous, so messages are encrypted.
+    #[zbus(property)]
+    fn private(&self) -> zbus::Result<bool>;
 
     #[zbus(signal)]
     fn occupants_changed(&self) -> zbus::Result<()>;

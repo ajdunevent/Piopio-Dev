@@ -458,6 +458,10 @@ pub async fn conversation_encryption(shared: &Shared, peer: &str, wanted: bool) 
     if !wanted {
         return "none";
     }
+    // Group chats: encrypted when members-only and non-anonymous.
+    if let Some(live) = shared.rooms.get(peer).await {
+        return if live.private { "omemo" } else { "none" };
+    }
     let devices = shared
         .store
         .devices(shared.account_id, peer.to_owned())
@@ -547,44 +551,74 @@ pub async fn encrypt(shared: &Shared, peer: &BareJid, wanted: bool, body: &str) 
         return Outgoing::Plain;
     }
     ensure_devices(shared, peer).await;
-    ensure_devices(shared, &shared.jid.clone()).await;
-    let Ok((own_id, _)) = own_device(shared).await else {
-        return Outgoing::Failed("our OMEMO keys could not be loaded".into());
-    };
-    let peer_devices: Vec<_> = shared
+    if active_devices(shared, peer).await.is_empty() {
+        tracing::debug!(account = %shared.jid, %peer, "no OMEMO devices: sending in the clear");
+        return Outgoing::Plain;
+    }
+    encrypt_for(shared, std::slice::from_ref(peer), body).await
+}
+
+/// Whether `peer` has OMEMO devices (fetching their list if needed).
+pub async fn peer_uses_omemo(shared: &Shared, peer: &BareJid) -> bool {
+    ensure_devices(shared, peer).await;
+    !active_devices(shared, peer).await.is_empty()
+}
+
+/// Encrypts for a private group chat's members: every member must use
+/// OMEMO, or nothing is sent.
+pub async fn encrypt_group(shared: &Shared, members: &[BareJid], body: &str) -> Outgoing {
+    let others: Vec<BareJid> = members
+        .iter()
+        .filter(|m| **m != shared.jid)
+        .cloned()
+        .collect();
+    for m in &others {
+        ensure_devices(shared, m).await;
+        if active_devices(shared, m).await.is_empty() {
+            return Outgoing::Failed(format!("{m} doesn't use OMEMO"));
+        }
+    }
+    if others.is_empty() {
+        return Outgoing::Failed("nobody else is a member of this room".into());
+    }
+    encrypt_for(shared, &others, body).await
+}
+
+async fn active_devices(shared: &Shared, jid: &BareJid) -> Vec<crate::store::DeviceRow> {
+    shared
         .store
-        .devices(shared.account_id, peer.to_string())
+        .devices(shared.account_id, jid.to_string())
         .await
         .unwrap_or_default()
         .into_iter()
         .filter(|d| d.active)
-        .collect();
-    if peer_devices.is_empty() {
-        tracing::debug!(account = %shared.jid, %peer, "no OMEMO devices: sending in the clear");
-        return Outgoing::Plain;
+        .collect()
+}
+
+/// Encrypts `body` for every trusted device of `recipients` and our own
+/// other devices. Fails if a recipient ends up with no device.
+async fn encrypt_for(shared: &Shared, recipients: &[BareJid], body: &str) -> Outgoing {
+    ensure_devices(shared, &shared.jid.clone()).await;
+    let Ok((own_id, _)) = own_device(shared).await else {
+        return Outgoing::Failed("our OMEMO keys could not be loaded".into());
+    };
+    let mut targets: Vec<(BareJid, u32)> = Vec::new();
+    for r in recipients {
+        for d in active_devices(shared, r).await {
+            targets.push((r.clone(), d.device_id));
+        }
     }
-    let own_devices: Vec<_> = shared
-        .store
-        .devices(shared.account_id, shared.jid.to_string())
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|d| d.active && d.device_id != own_id)
-        .collect();
+    for d in active_devices(shared, &shared.jid).await {
+        if d.device_id != own_id {
+            targets.push((shared.jid.clone(), d.device_id));
+        }
+    }
 
     let _sessions = shared.omemo.sessions.lock().await;
     let payload = omemo::encrypt_payload(body.as_bytes());
     let mut keys = Vec::new();
-    let mut peer_keys = 0;
-    for (jid, device) in peer_devices
-        .iter()
-        .map(|d| (peer.clone(), d.device_id))
-        .chain(
-            own_devices
-                .iter()
-                .map(|d| (shared.jid.clone(), d.device_id)),
-        )
-    {
+    let mut reached: Vec<BareJid> = Vec::new();
+    for (jid, device) in targets {
         let Some(mut session) = session_for(shared, &jid, device).await else {
             continue;
         };
@@ -597,14 +631,14 @@ pub async fn encrypt(shared: &Shared, peer: &BareJid, wanted: bool, body: &str) 
             key = key.attr(n("prekey"), "true");
         }
         keys.push(key.build());
-        if jid == *peer {
-            peer_keys += 1;
+        if !reached.contains(&jid) {
+            reached.push(jid);
         }
     }
-    tracing::debug!(account = %shared.jid, %peer, keys = ?keys.iter().filter_map(|k| k.attr("rid")).collect::<Vec<_>>(), "encrypted");
-    if peer_keys == 0 {
+    tracing::debug!(account = %shared.jid, keys = ?keys.iter().filter_map(|k| k.attr("rid")).collect::<Vec<_>>(), "encrypted");
+    if let Some(missed) = recipients.iter().find(|r| !reached.contains(r)) {
         return Outgoing::Failed(format!(
-            "none of {peer}'s OMEMO devices is trusted or reachable"
+            "none of {missed}'s OMEMO devices is trusted or reachable"
         ));
     }
     let mut header =
@@ -627,6 +661,25 @@ pub async fn encrypt(shared: &Shared, peer: &BareJid, wanted: bool, body: &str) 
             )
             .build(),
     )
+}
+
+/// Which of `candidates` owns OMEMO device `device` (to know who sent an
+/// encrypted group chat message whose sender we can't see).
+pub async fn owner_of_device(
+    shared: &Shared,
+    candidates: &[BareJid],
+    device: u32,
+) -> Option<BareJid> {
+    for c in candidates {
+        if active_devices(shared, c)
+            .await
+            .iter()
+            .any(|d| d.device_id == device)
+        {
+            return Some(c.clone());
+        }
+    }
+    None
 }
 
 /// A session with a trusted device, built from its bundle if needed.

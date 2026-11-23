@@ -7,7 +7,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_xmpp::jid::BareJid;
 use tokio_xmpp::minidom::Element;
 use tokio_xmpp::parsers::iq::Iq;
-use zbus::object_server::InterfaceRef;
+use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::{OwnedObjectPath, Value};
 
 use piopio_dbus::ACCOUNT_API_VERSION;
@@ -140,6 +140,16 @@ impl AccountObject {
         Ok(path)
     }
 
+    /// Someone invited us to a group chat (room, who, reason, password).
+    #[zbus(signal)]
+    pub async fn room_invitation(
+        emitter: &SignalEmitter<'_>,
+        room: &str,
+        from: &str,
+        reason: &str,
+        password: &str,
+    ) -> zbus::Result<()>;
+
     /// Sets the account's picture from an image file (read from the file
     /// descriptor); contacts see it. An empty file removes it.
     async fn set_avatar(
@@ -173,7 +183,9 @@ impl AccountObject {
 
     /// Joins a group chat and bookmarks it. Returns the conversation's path
     /// right away; the Room interface on it follows the joining. An empty
-    /// nick uses the account's name. Options: "password" (s).
+    /// nick uses the account's name. Options: "password" (s), "private" (b:
+    /// if we create the room, make it members-only and non-anonymous, so
+    /// it is encrypted).
     async fn join_room(
         &self,
         #[zbus(header)] header: zbus::message::Header<'_>,
@@ -195,9 +207,19 @@ impl AccountObject {
             .and_then(|v| <&str>::try_from(v).ok())
             .unwrap_or("")
             .to_owned();
-        crate::rooms::join(&self.session, &room, Some(nick.to_owned()), password)
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+        let private = options
+            .get("private")
+            .and_then(|v| bool::try_from(v).ok())
+            .unwrap_or(false);
+        crate::rooms::join_with(
+            &self.session,
+            &room,
+            Some(nick.to_owned()),
+            password,
+            private,
+        )
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
     /// Changes the account's password on the server (XEP-0077), then uses it.

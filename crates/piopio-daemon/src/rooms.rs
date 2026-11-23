@@ -56,6 +56,13 @@ pub struct Live {
     pub occupants: BTreeMap<String, Occupant>,
     /// Whether joining was already retried (see presence errors).
     pub retried: bool,
+    /// Members-only and non-anonymous: messages can be OMEMO encrypted.
+    pub private: bool,
+    /// Everyone affiliated with a private room (they get our keys).
+    pub members: Vec<BareJid>,
+    /// If we create this room, make it private (members only, real JIDs
+    /// visible to members), as needed for OMEMO.
+    pub create_private: bool,
 }
 
 /// The account's rooms, by room JID.
@@ -143,10 +150,26 @@ pub async fn join(
     nick: Option<String>,
     password: String,
 ) -> anyhow::Result<OwnedObjectPath> {
+    join_with(session, room, nick, password, false).await
+}
+
+/// Like `join`; `private` makes a room we create members-only and
+/// non-anonymous, so it can be encrypted.
+pub async fn join_with(
+    session: &Session,
+    room: &BareJid,
+    nick: Option<String>,
+    password: String,
+    private: bool,
+) -> anyhow::Result<OwnedObjectPath> {
     let (conversation, path) = session
         .conversations
         .get_kind(session, room, "room")
         .await?;
+    session
+        .rooms
+        .update(room.as_str(), |l| l.create_private = private)
+        .await;
     let mut row = session
         .store
         .room(conversation)
@@ -560,9 +583,29 @@ pub async fn presence(session: &Session, presence: &Presence) -> bool {
             if statuses.contains(&Status::RoomHasBeenCreated) {
                 // We created it: accept the default configuration ("instant
                 // room"), or nobody else can enter.
-                let form = Element::builder("x", "jabber:x:data")
-                    .attr(n("type"), "submit")
-                    .build();
+                let mut form = Element::builder("x", "jabber:x:data").attr(n("type"), "submit");
+                if live.create_private {
+                    let field = |var: &str, value: &str| {
+                        Element::builder("field", "jabber:x:data")
+                            .attr(n("var"), var)
+                            .append(
+                                Element::builder("value", "jabber:x:data")
+                                    .append(value)
+                                    .build(),
+                            )
+                            .build()
+                    };
+                    form = form
+                        .append(field(
+                            "FORM_TYPE",
+                            "http://jabber.org/protocol/muc#roomconfig",
+                        ))
+                        .append(field("muc#roomconfig_membersonly", "1"))
+                        .append(field("muc#roomconfig_whois", "anyone"))
+                        .append(field("muc#roomconfig_persistentroom", "1"))
+                        .append(field("muc#roomconfig_publicroom", "0"));
+                }
+                let form = form.build();
                 let query = Element::builder("query", "http://jabber.org/protocol/muc#owner")
                     .append(form)
                     .build();
@@ -580,13 +623,123 @@ pub async fn presence(session: &Session, presence: &Presence) -> bool {
                 }
                 room_changed(session, room.as_str()).await;
                 let s = session.clone();
-                tokio::spawn(async move { catch_up(&s, &room).await });
+                tokio::spawn(async move {
+                    learn(&s, &room).await;
+                    catch_up(&s, &room).await
+                });
             }
             occupants_changed(session, from.to_bare().as_str()).await;
         }
         _ => {}
     }
     true
+}
+
+/// Finds out whether a room is private, and if so who its members are.
+async fn learn(session: &Session, room: &BareJid) {
+    let to = Some(Jid::from(room.clone()));
+    let info = crate::pep::get(
+        to.clone(),
+        Element::builder("query", ns::DISCO_INFO).build(),
+    );
+    let features: Vec<String> = match session.iq(info).await {
+        Ok(Some(reply)) => reply
+            .children()
+            .filter(|c| c.is("feature", ns::DISCO_INFO))
+            .filter_map(|c| c.attr("var").map(str::to_owned))
+            .collect(),
+        _ => vec![],
+    };
+    let private = features.iter().any(|f| f == "muc_nonanonymous")
+        && features.iter().any(|f| f == "muc_membersonly");
+    let mut members: Vec<BareJid> = Vec::new();
+    if private {
+        for affiliation in ["owner", "admin", "member"] {
+            let query = Element::builder("query", "http://jabber.org/protocol/muc#admin")
+                .append(
+                    Element::builder("item", "http://jabber.org/protocol/muc#admin")
+                        .attr(n("affiliation"), affiliation)
+                        .build(),
+                )
+                .build();
+            if let Ok(Some(reply)) = session.iq(crate::pep::get(to.clone(), query)).await {
+                for item in reply.children() {
+                    if let Some(jid) = item.attr("jid").and_then(|j| j.parse::<Jid>().ok()) {
+                        let bare = jid.to_bare();
+                        if !members.contains(&bare) {
+                            members.push(bare);
+                        }
+                    }
+                }
+            }
+        }
+        // Occupants we can see count too (an admin list may be hidden).
+        if let Some(live) = session.rooms.get(room.as_str()).await {
+            for o in live.occupants.values() {
+                if let Ok(j) = o.jid.parse::<BareJid>()
+                    && !members.contains(&j)
+                {
+                    members.push(j);
+                }
+            }
+        }
+    }
+    session
+        .rooms
+        .update(room.as_str(), |l| {
+            l.private = private;
+            l.members = members;
+        })
+        .await;
+    session
+        .conversations
+        .encryption_changed(session, room)
+        .await;
+}
+
+/// Invites someone: in a members-only room they become a member first.
+pub async fn invite(
+    session: &Session,
+    room: &BareJid,
+    who: &BareJid,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let live = session
+        .rooms
+        .get(room.as_str())
+        .await
+        .ok_or_else(|| anyhow::anyhow!("not one of our rooms"))?;
+    if live.private {
+        let query = Element::builder("query", "http://jabber.org/protocol/muc#admin")
+            .append(
+                Element::builder("item", "http://jabber.org/protocol/muc#admin")
+                    .attr(n("affiliation"), "member")
+                    .attr(n("jid"), who.as_str())
+                    .build(),
+            )
+            .build();
+        session
+            .iq(crate::pep::set(Some(Jid::from(room.clone())), query))
+            .await
+            .map_err(|e| anyhow::anyhow!("the room didn't let us add {who}: {e}"))?;
+        session
+            .rooms
+            .update(room.as_str(), |l| {
+                if !l.members.contains(who) {
+                    l.members.push(who.clone());
+                }
+            })
+            .await;
+    }
+    // A direct invitation (XEP-0249), which every client understands.
+    let mut x = Element::builder("x", "jabber:x:conference").attr(n("jid"), room.as_str());
+    if !reason.is_empty() {
+        x = x.attr(n("reason"), reason);
+    }
+    let mut message = tokio_xmpp::parsers::message::Message::new(Some(Jid::from(who.clone())));
+    message.payloads.push(x.build());
+    session.send(message).await;
+    Ok(())
 }
 
 /// A subject change from the room.
@@ -781,6 +934,32 @@ impl RoomObject {
         .await
         .map(drop)
         .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Invites someone (making them a member of a members-only room).
+    async fn invite(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        jid: &str,
+        reason: &str,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let room: BareJid = self
+            .room
+            .parse()
+            .map_err(|_| zbus::fdo::Error::Failed("not a room".into()))?;
+        let who: BareJid = jid
+            .parse()
+            .map_err(|_| zbus::fdo::Error::InvalidArgs("not a valid JID".into()))?;
+        invite(&self.session, &room, &who, reason)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{e:#}")))
+    }
+
+    /// Members-only and non-anonymous, so messages are encrypted.
+    #[zbus(property)]
+    async fn private(&self) -> bool {
+        self.live().await.private
     }
 
     /// Leaves the room. Its history stays.
