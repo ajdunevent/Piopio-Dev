@@ -9,10 +9,12 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 PIOPIO_TEST_SERVER_DIR=$(mktemp -d)
 export PIOPIO_TEST_SERVER_DIR
-cfg="$here/prosody.cfg.lua"
+cfg="$PIOPIO_TEST_SERVER_DIR/prosody.cfg.lua"
 # prosodyctl only checks this for files it may hand to the prosody user.
 export USER="${USER:-$(id -un)}"
 mkdir -p "$PIOPIO_TEST_SERVER_DIR/data" "$PIOPIO_TEST_SERVER_DIR/certs"
+sed -e "s|@DIR@|$PIOPIO_TEST_SERVER_DIR|g" -e "s|@USER@|$USER|g" \
+    "$here/prosody.cfg.lua" >"$cfg"
 
 for user in alice bob carol dave; do
     if ! out=$(prosodyctl --config "$cfg" register "$user" localhost password 2>&1); then

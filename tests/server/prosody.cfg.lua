@@ -1,11 +1,13 @@
 -- Throwaway Prosody for Piopio's tests. Plaintext on 127.0.0.1 only;
 -- never use this configuration for a real server.
-local dir = os.getenv("PIOPIO_TEST_SERVER_DIR")
+-- run.sh fills in @DIR@ and @USER@; newer Prosody versions do not let the
+-- configuration read environment variables.
+local dir = "@DIR@"
 
 daemonize = false
 -- CI runs as an ordinary user; containers often run as root.
 run_as_root = true
-prosody_user = os.getenv("USER") or "root"
+prosody_user = "@USER@"
 pidfile = dir .. "/prosody.pid"
 data_path = dir .. "/data"
 certificates = dir .. "/certs"
