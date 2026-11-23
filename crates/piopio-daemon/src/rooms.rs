@@ -54,6 +54,8 @@ pub struct Live {
     pub error: String,
     pub subject: String,
     pub occupants: BTreeMap<String, Occupant>,
+    /// Whether joining was already retried (see presence errors).
+    pub retried: bool,
 }
 
 /// The account's rooms, by room JID.
@@ -443,6 +445,27 @@ pub async fn presence(session: &Session, presence: &Presence) -> bool {
                     .find(|p| p.is("error", ns::DEFAULT_NS))
                     .and_then(|e| e.children().next().map(|c| c.name().to_owned()))
                     .unwrap_or_default();
+                // A room someone is creating stays locked for a moment:
+                // try once more before giving up.
+                if why == "item-not-found"
+                    && session
+                        .rooms
+                        .update(room.as_str(), |l| !std::mem::replace(&mut l.retried, true))
+                        .await
+                        == Some(true)
+                {
+                    let s = session.clone();
+                    let room = room.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        if let Some(live) = s.rooms.get(room.as_str()).await
+                            && let Ok(Some(row)) = s.store.room(live.conversation).await
+                        {
+                            send_join(&s, &room, &row).await;
+                        }
+                    });
+                    return true;
+                }
                 let text = match why.as_str() {
                     "conflict" => "Someone in the room already uses that nickname",
                     "not-authorized" => "The room needs a password",
@@ -530,6 +553,7 @@ pub async fn presence(session: &Session, presence: &Presence) -> bool {
                         l.nick = nick.clone();
                         l.state = "joined".into();
                         l.error.clear();
+                        l.retried = false;
                     }
                 })
                 .await;

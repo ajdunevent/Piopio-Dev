@@ -318,11 +318,7 @@ impl ChatPage {
     }
 
     fn room_jid(&self) -> Result<String, ()> {
-        self.proxy
-            .cached_peer()
-            .ok()
-            .flatten()
-            .ok_or(())
+        self.proxy.cached_peer().ok().flatten().ok_or(())
     }
 
     /// The group chat parts: subject or state under the title, and the

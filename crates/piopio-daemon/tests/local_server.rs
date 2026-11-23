@@ -102,18 +102,19 @@ async fn contacts_chat_receipts_and_markers() {
     let sent_id = alice_chat.send("Hello Bob", HashMap::new()).await.unwrap();
 
     let bob_chat_path = wait_for(20, "Bob's conversation with Alice", || async {
-        bob.conversations(&bob_path).await.into_iter().next()
+        bob.conversation_with(&bob_path, "alice@localhost").await
     })
     .await;
     let bob_chat = bob.conversation(bob_chat_path).await;
     assert_eq!(bob_chat.peer().await.unwrap(), "alice@localhost");
     let received = wait_for(20, "Bob to receive the message", || async {
+        // Older history from other tests may come first.
         bob_chat
-            .get_messages("", 10)
+            .get_messages("", 50)
             .await
             .unwrap()
             .into_iter()
-            .next()
+            .find(|m| text(m, "body") == "Hello Bob")
     })
     .await;
     assert_eq!(text(&received, "body"), "Hello Bob");
@@ -124,7 +125,7 @@ async fn contacts_chat_receipts_and_markers() {
     let state_of = |id: String| {
         let chat = &alice_chat;
         async move {
-            chat.get_messages("", 10)
+            chat.get_messages("", 50)
                 .await
                 .unwrap()
                 .into_iter()
@@ -149,11 +150,15 @@ async fn contacts_chat_receipts_and_markers() {
     // Bob answers; Alice's conversation shows both, oldest first.
     bob_chat.send("Hi Alice", HashMap::new()).await.unwrap();
     wait_for(20, "Alice to receive the answer", || async {
-        let messages = alice_chat.get_messages("", 10).await.unwrap();
-        (messages.len() == 2).then_some(messages)
+        let messages = alice_chat.get_messages("", 50).await.unwrap();
+        messages
+            .iter()
+            .any(|m| text(m, "body") == "Hi Alice")
+            .then_some(())
     })
     .await;
-    let messages = alice_chat.get_messages("", 10).await.unwrap();
+    let messages = alice_chat.get_messages("", 50).await.unwrap();
+    let messages = &messages[messages.len() - 2..];
     assert_eq!(text(&messages[0], "body"), "Hello Bob");
     assert_eq!(text(&messages[1], "body"), "Hi Alice");
     for m in &messages {
@@ -193,7 +198,9 @@ async fn carbons_archive_and_restart() {
         .await
         .unwrap();
     let laptop_chat = wait_for(20, "the carbon on the laptop", || async {
-        laptop.conversations(&laptop_path).await.into_iter().next()
+        laptop
+            .conversation_with(&laptop_path, "dave@localhost")
+            .await
     })
     .await;
     let laptop_chat = laptop.conversation(laptop_chat).await;
@@ -212,7 +219,7 @@ async fn carbons_archive_and_restart() {
 
     // Dave answers; both of Carol's devices get it, once each.
     let dave_chat = wait_for(20, "Dave's conversation", || async {
-        dave.conversations(&dave_path).await.into_iter().next()
+        dave.conversation_with(&dave_path, "carol@localhost").await
     })
     .await;
     let dave_chat = dave.conversation(dave_chat).await;
@@ -229,7 +236,9 @@ async fn carbons_archive_and_restart() {
     let tablet = TestDaemon::start().await.unwrap();
     let (tablet_path, _) = tablet.add_local("carol").await;
     let tablet_chat = wait_for(20, "the archived conversation", || async {
-        tablet.conversations(&tablet_path).await.into_iter().next()
+        tablet
+            .conversation_with(&tablet_path, "dave@localhost")
+            .await
     })
     .await;
     let tablet_chat = tablet.conversation(tablet_chat).await;

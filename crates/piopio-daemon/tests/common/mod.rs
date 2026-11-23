@@ -211,6 +211,20 @@ impl TestDaemon {
             .unwrap()
     }
 
+    /// The account's conversation with `peer`, if there is one yet.
+    pub async fn conversation_with(
+        &self,
+        account: &zbus::zvariant::OwnedObjectPath,
+        peer: &str,
+    ) -> Option<zbus::zvariant::OwnedObjectPath> {
+        for path in self.conversations(account).await {
+            if self.conversation(path.clone()).await.peer().await.ok()? == peer {
+                return Some(path);
+            }
+        }
+        None
+    }
+
     /// Waits until the account's OMEMO device is published; returns its id.
     pub async fn wait_published(&self, path: &zbus::zvariant::OwnedObjectPath) -> u32 {
         let omemo = self.omemo(path.clone()).await;

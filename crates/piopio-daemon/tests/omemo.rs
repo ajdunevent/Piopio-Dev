@@ -36,7 +36,7 @@ async fn encryption_and_trust() {
         .unwrap();
 
     let frank_chat = wait_for(20, "Frank's conversation", || async {
-        frank.conversations(&frank_path).await.into_iter().next()
+        frank.conversation_with(&frank_path, "erin@localhost").await
     })
     .await;
     let frank_chat = frank.conversation(frank_chat).await;

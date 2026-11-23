@@ -460,6 +460,9 @@ async fn handle(
     };
     let counts_as_unread = !outgoing && source != (Source::Archive { first_sync: true });
     let stored = store_message(session, &peer, new, counts_as_unread).await;
+    if let Some((row, _)) = &stored {
+        attach_if_file(session, &peer, &message, row).await;
+    }
 
     // Live archive ids keep the catch-up position current once caught up.
     if source == Source::Live
@@ -596,6 +599,9 @@ async fn handle_room(
     };
     let first_sync = source == (Source::Archive { first_sync: true });
     let stored = store_message(session, &room, new, !outgoing && !first_sync).await;
+    if let Some((row, _)) = &stored {
+        attach_if_file(session, &room, &message, row).await;
+    }
     if source == Source::Live
         && let Some(id) = server_id
     {
@@ -606,6 +612,16 @@ async fn handle_room(
         && !first_sync
     {
         crate::notify::message(session, &path, &row).await;
+    }
+}
+
+/// Records the file a just-stored message shares, if it shares one.
+async fn attach_if_file(session: &Session, peer: &BareJid, message: &Message, row: &MessageRow) {
+    let Some(url) = crate::files::shared_link(message, &row.body) else {
+        return;
+    };
+    if let Ok((conversation, _)) = session.conversations.get(session, peer).await {
+        crate::files::received(session, conversation, row, url).await;
     }
 }
 
@@ -889,6 +905,9 @@ pub fn message_dict(m: &MessageRow) -> HashMap<String, OwnedValue> {
     );
     map.insert("reply-preview".into(), str_value(m.reply_preview.clone()));
     map.insert("reactions".into(), rich::reactions_owned(&m.reactions));
+    if let Some(a) = &m.attachment {
+        crate::files::dict_entries(a, &mut map);
+    }
     map
 }
 
@@ -1227,6 +1246,167 @@ impl ConversationObject {
             }
         });
         Ok(row.id.to_string())
+    }
+
+    /// Shares a file (read from `file`, an open file descriptor). Returns
+    /// the message's id right away; the upload follows as MessageChanged
+    /// (file-state uploading → done, then the message's state).
+    async fn send_file(
+        &mut self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+        file: zbus::zvariant::OwnedFd,
+        name: &str,
+        _options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<String> {
+        access::check(&header)?;
+        let peer = self.valid_peer()?;
+        self.check_joined().await?;
+        let fd: std::os::fd::OwnedFd = file.into();
+        let data = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+            use std::io::Read;
+            let mut data = Vec::new();
+            std::fs::File::from(fd)
+                .take(crate::files::MAX_FILE + 1)
+                .read_to_end(&mut data)?;
+            Ok(data)
+        })
+        .await
+        .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+        .map_err(|e| zbus::fdo::Error::Failed(format!("the file can't be read: {e}")))?;
+        if data.len() as u64 > crate::files::MAX_FILE {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "the file is too large".into(),
+            ));
+        }
+        let name = {
+            let n = crate::files::name_of(&format!("/{}", name.replace('/', "_")));
+            if n.is_empty() { "file".to_owned() } else { n }
+        };
+        let mime = crate::files::mime_of(&name).to_owned();
+        let encryption = if self.is_room() {
+            "none"
+        } else {
+            crate::omemo::conversation_encryption(
+                &self.session,
+                &self.row.peer,
+                self.row.encryption_wanted,
+            )
+            .await
+        };
+        let origin_id = new_id();
+        let new = NewMessage {
+            origin_id: origin_id.clone(),
+            server_id: None,
+            outgoing: true,
+            sender: self.me().await,
+            body: String::new(),
+            timestamp: now_ms(),
+            state: state::PENDING,
+            encryption,
+            ..Default::default()
+        };
+        let mut row = self
+            .session
+            .store
+            .insert_message(self.row.id, new)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .expect("a fresh origin id is never a duplicate");
+        let (path, thumbnail) = crate::files::keep_own_copy(row.id, &name, &mime, data.clone())
+            .await
+            .unwrap_or_default();
+        let mut attachment = crate::store::AttachmentRow {
+            message_id: row.id,
+            url: String::new(),
+            name: name.clone(),
+            mime: mime.clone(),
+            size: Some(data.len() as i64),
+            path,
+            thumbnail,
+            state: crate::files::state::UPLOADING.into(),
+        };
+        let _ = self.session.store.set_attachment(attachment.clone()).await;
+        row.attachment = Some(attachment.clone());
+        Self::message_added(&emitter, message_dict(&row)).await?;
+        self.row.last_activity = row.timestamp;
+        self.last_activity_changed(&emitter).await?;
+        self.save().await;
+
+        let session = self.session.clone();
+        let conversation = self.row.id;
+        let kind = self.message_type();
+        let tracked = !self.is_room();
+        let wanted = encryption == "omemo";
+        let message_id = row.id;
+        tokio::spawn(async move {
+            let link = crate::files::upload(&session, &name, &mime, data, wanted).await;
+            let new_state = match link {
+                Err(e) => {
+                    tracing::warn!("upload of {name} failed: {e:#}");
+                    attachment.state = crate::files::state::FAILED.into();
+                    state::FAILED
+                }
+                Ok(link) => {
+                    attachment.url = link.clone();
+                    attachment.state = crate::files::state::DONE.into();
+                    let _ = session.store.set_body(message_id, link.clone()).await;
+                    // An encrypted file's link only travels encrypted.
+                    let extra = if wanted {
+                        vec![]
+                    } else {
+                        vec![crate::files::oob_element(&link)]
+                    };
+                    let (s, _) = deliver(
+                        &session, &peer, kind, wanted, &origin_id, &link, extra, tracked,
+                    )
+                    .await;
+                    let changes = HashMap::from([("body", Value::from(link))]);
+                    emit_changed(&session, conversation, message_id, changes).await;
+                    s
+                }
+            };
+            let _ = session.store.set_attachment(attachment.clone()).await;
+            let changes = HashMap::from([
+                ("file-url", Value::from(attachment.url.clone())),
+                ("file-state", Value::from(attachment.state.clone())),
+            ]);
+            emit_changed(&session, conversation, message_id, changes).await;
+            if let Ok(Some(row)) = session
+                .store
+                .advance_state(conversation, origin_id, new_state)
+                .await
+            {
+                let changes = HashMap::from([("state", Value::from(row.state))]);
+                emit_changed(&session, conversation, message_id, changes).await;
+            }
+        });
+        Ok(row.id.to_string())
+    }
+
+    /// Downloads a message's file (pictures come by themselves). Progress
+    /// follows as MessageChanged (file-state, file-path).
+    async fn download_file(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        id: &str,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let target = self.target(id).await?;
+        let Some(mut a) = target.attachment else {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "the message has no file".into(),
+            ));
+        };
+        if a.state == crate::files::state::FAILED {
+            a.state = crate::files::state::REMOTE.into();
+        }
+        let session = self.session.clone();
+        let conversation = self.row.id;
+        tokio::spawn(async move {
+            crate::files::download(&session, conversation, a, crate::files::MAX_FILE).await
+        });
+        Ok(())
     }
 
     /// Corrects one of our messages (XEP-0308).

@@ -108,6 +108,19 @@ const SCHEMA: &[&str] = &[
         mam_last_id TEXT
     );
     "#,
+    // Version 5: shared files
+    r#"
+    CREATE TABLE attachments (
+        message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+        url        TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        mime       TEXT NOT NULL DEFAULT '',
+        size       INTEGER,
+        path       TEXT NOT NULL DEFAULT '',
+        thumbnail  TEXT NOT NULL DEFAULT '',
+        state      TEXT NOT NULL
+    );
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -179,6 +192,24 @@ pub struct MessageRow {
     pub reply_preview: String,
     /// Reactions (XEP-0444): each sender's emojis.
     pub reactions: Vec<(String, Vec<String>)>,
+    /// The file the message shares, if any.
+    pub attachment: Option<AttachmentRow>,
+}
+
+/// A file shared in a message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttachmentRow {
+    pub message_id: i64,
+    /// The link as shared (https:// or aesgcm://).
+    pub url: String,
+    pub name: String,
+    pub mime: String,
+    pub size: Option<i64>,
+    /// Where the file is on disk, once downloaded (or sent from here).
+    pub path: String,
+    pub thumbnail: String,
+    /// See `files::state`.
+    pub state: String,
 }
 
 /// A message about to be stored. Duplicates (same conversation, origin id and
@@ -492,6 +523,7 @@ impl Store {
                 reply_to_sender: m.reply_to_sender,
                 reply_preview: m.reply_preview,
                 reactions: vec![],
+                attachment: None,
             }))
         })
         .await
@@ -517,6 +549,7 @@ impl Store {
             rows.reverse();
             for row in &mut rows {
                 row.reactions = reactions_of(db, row.id)?;
+                row.attachment = attachment_of(db, row.id)?;
             }
             Ok(rows)
         })
@@ -670,6 +703,7 @@ impl Store {
                 .optional()?;
             let Some(mut row) = row else { return Ok(None) };
             row.reactions = reactions_of(db, row.id)?;
+            row.attachment = attachment_of(db, row.id)?;
             Ok(Some(row))
         })
         .await
@@ -693,7 +727,36 @@ impl Store {
                 .optional()?;
             let Some(mut row) = row else { return Ok(None) };
             row.reactions = reactions_of(db, row.id)?;
+                row.attachment = attachment_of(db, row.id)?;
             Ok(Some(row))
+        })
+        .await
+    }
+
+    pub async fn set_attachment(&self, a: AttachmentRow) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO attachments (message_id, url, name, mime, size, path, thumbnail, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT (message_id) DO UPDATE SET url = excluded.url, name = excluded.name,
+                   mime = excluded.mime, size = excluded.size, path = excluded.path,
+                   thumbnail = excluded.thumbnail, state = excluded.state",
+                params![a.message_id, a.url, a.name, a.mime, a.size, a.path, a.thumbnail, a.state],
+            )
+            .map(drop)
+        })
+        .await
+    }
+
+    /// Sets a message's body without marking it edited (a file's link,
+    /// once uploaded).
+    pub async fn set_body(&self, id: i64, body: String) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "UPDATE messages SET body = ?2 WHERE id = ?1",
+                params![id, body],
+            )
+            .map(drop)
         })
         .await
     }
@@ -915,6 +978,26 @@ const CONVERSATION_COLUMNS: &str =
 const MESSAGE_COLUMNS: &str = "id, origin_id, server_id, outgoing, sender, body, timestamp, state, \
      encryption, edited, retracted, reply_to, reply_to_sender, reply_preview";
 
+fn attachment_of(db: &Connection, message: i64) -> rusqlite::Result<Option<AttachmentRow>> {
+    db.prepare_cached(
+        "SELECT message_id, url, name, mime, size, path, thumbnail, state
+         FROM attachments WHERE message_id = ?1",
+    )?
+    .query_row([message], |r| {
+        Ok(AttachmentRow {
+            message_id: r.get(0)?,
+            url: r.get(1)?,
+            name: r.get(2)?,
+            mime: r.get(3)?,
+            size: r.get(4)?,
+            path: r.get(5)?,
+            thumbnail: r.get(6)?,
+            state: r.get(7)?,
+        })
+    })
+    .optional()
+}
+
 fn reactions_of(db: &Connection, message: i64) -> rusqlite::Result<Vec<(String, Vec<String>)>> {
     let mut q = db.prepare_cached(
         "SELECT sender, emojis FROM reactions WHERE message_id = ?1 ORDER BY sender",
@@ -957,6 +1040,7 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
         reply_to_sender: r.get(12)?,
         reply_preview: r.get(13)?,
         reactions: vec![],
+        attachment: None,
     })
 }
 

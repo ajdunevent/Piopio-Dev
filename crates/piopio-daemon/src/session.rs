@@ -79,6 +79,7 @@ pub struct Shared {
     pub presence: Mutex<(String, String)>,
     pub omemo: crate::omemo::OmemoState,
     pub rooms: crate::rooms::Rooms,
+    pub uploads: crate::files::Uploads,
 }
 
 /// Handle used by everything outside the session task.
@@ -148,6 +149,7 @@ pub fn new_shared(
         presence: Mutex::new(("available".into(), String::new())),
         omemo: crate::omemo::OmemoState::default(),
         rooms: crate::rooms::Rooms::default(),
+        uploads: crate::files::Uploads::default(),
     })
 }
 
@@ -326,6 +328,7 @@ async fn came_online(shared: Session, features: StreamFeatures) {
     messages::enable_carbons(&shared).await;
     send_presence(&shared).await;
     let _ = features;
+    shared.uploads.forget().await;
     crate::omemo::online(&shared).await;
     crate::rooms::online(&shared).await;
     messages::catch_up(&shared).await;

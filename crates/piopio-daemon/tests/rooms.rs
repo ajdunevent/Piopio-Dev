@@ -141,7 +141,9 @@ async fn group_chat() {
     let tablet = TestDaemon::start().await.unwrap();
     let (tablet_path, _) = tablet.add_local("frank").await;
     let tablet_room = wait_for(20, "the bookmarked room on the tablet", || async {
-        tablet.conversations(&tablet_path).await.into_iter().next()
+        tablet
+            .conversation_with(&tablet_path, "lunch@conference.localhost")
+            .await
     })
     .await;
     let tablet_room = room(&tablet, tablet_room).await;

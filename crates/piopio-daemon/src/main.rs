@@ -10,6 +10,7 @@ mod background;
 mod connect;
 mod daemon;
 mod disco;
+mod files;
 mod login;
 mod messages;
 mod notify;
@@ -29,6 +30,8 @@ use tokio::sync::{Mutex, watch};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // One TLS implementation for XMPP and HTTP alike.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(

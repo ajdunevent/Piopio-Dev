@@ -180,6 +180,18 @@ pub trait Conversation {
     /// Clears Unread and tells the contact we have read up to here.
     fn mark_read(&self) -> zbus::Result<()>;
 
+    /// Shares a file, read from an open file descriptor; returns the
+    /// message's id. The upload follows as MessageChanged (file-state).
+    fn send_file(
+        &self,
+        file: zbus::zvariant::Fd<'_>,
+        name: &str,
+        options: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<String>;
+
+    /// Downloads a message's file; file-state and file-path follow.
+    fn download_file(&self, id: &str) -> zbus::Result<()>;
+
     /// Corrects one of our messages.
     fn correct(&self, id: &str, body: &str) -> zbus::Result<()>;
 

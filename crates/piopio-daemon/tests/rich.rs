@@ -47,7 +47,7 @@ async fn reply_correct_react_retract() {
         .await;
     let hello = alice_chat.send("Hello", HashMap::new()).await.unwrap();
     let bob_chat = wait_for(20, "Bob's conversation", || async {
-        bob.conversations(&bob_path).await.into_iter().next()
+        bob.conversation_with(&bob_path, "alice@localhost").await
     })
     .await;
     let bob_chat = bob.conversation(bob_chat).await;
