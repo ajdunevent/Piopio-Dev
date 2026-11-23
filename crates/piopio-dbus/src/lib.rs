@@ -148,8 +148,14 @@ pub trait Conversation {
     fn pinned(&self) -> zbus::Result<bool>;
     #[zbus(property)]
     fn muted(&self) -> zbus::Result<String>;
+    /// The encryption new messages get: "omemo" or "none".
     #[zbus(property)]
     fn encryption(&self) -> zbus::Result<String>;
+    /// Whether to encrypt when the peer supports it (on by default).
+    #[zbus(property)]
+    fn encryption_wanted(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_encryption_wanted(&self, wanted: bool) -> zbus::Result<()>;
 
     /// One page of history, newest last, older than `before_id` ("" = newest).
     fn get_messages(&self, before_id: &str, limit: u32) -> zbus::Result<Vec<Dict>>;

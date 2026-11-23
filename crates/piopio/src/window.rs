@@ -607,7 +607,11 @@ fn text(dict: &Dict, key: &str) -> String {
 }
 
 fn preview(m: &Dict) -> String {
-    let body = text(m, "body");
+    let body = if text(m, "encryption") == "omemo-failed" {
+        "Encrypted message".to_owned()
+    } else {
+        text(m, "body")
+    };
     let outgoing = m
         .get("outgoing")
         .and_then(|v| bool::try_from(v).ok())

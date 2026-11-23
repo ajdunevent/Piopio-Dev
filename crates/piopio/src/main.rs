@@ -6,6 +6,7 @@
 mod chat;
 mod client;
 mod dialogs;
+mod encryption;
 mod window;
 
 /// A loading spinner: libadwaita's on GNOME 51, GTK's on older systems.
@@ -41,6 +42,8 @@ const CSS: &str = r#"
   font-size: smaller; font-weight: bold;
 }
 row.unread .title { font-weight: bold; }
+.undecryptable { font-style: italic; opacity: 0.7; }
+.fingerprint { font-family: monospace; }
 "#;
 
 fn main() -> glib::ExitCode {

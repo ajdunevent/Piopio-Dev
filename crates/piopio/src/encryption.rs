@@ -1,0 +1,190 @@
+//! The conversation's encryption settings: whether to encrypt, our own
+//! fingerprint, and the contact's devices with their trust.
+
+use std::rc::Rc;
+
+use adw::prelude::*;
+use adw::{glib, gtk};
+use piopio_dbus::{ConversationProxy, Dict, OmemoProxy};
+
+use crate::client::{self, run};
+use crate::window::Window;
+
+fn text(dict: &Dict, key: &str) -> String {
+    dict.get(key)
+        .and_then(|v| String::try_from(v.try_clone().ok()?).ok())
+        .unwrap_or_default()
+}
+
+/// The account's object path, from one of its conversations' paths.
+fn account_path(conversation: &str) -> String {
+    conversation
+        .rsplit_once("/conversation/")
+        .map(|(account, _)| account.to_owned())
+        .unwrap_or_default()
+}
+
+fn trust_text(trust: &str, active: bool) -> &'static str {
+    match (trust, active) {
+        (_, false) => "No longer in use",
+        ("verified", _) => "Verified",
+        ("blind", _) => "Trusted automatically, not verified",
+        ("untrusted", _) => "Not trusted: messages are not encrypted for it",
+        _ => "New device: not trusted until you decide",
+    }
+}
+
+/// A fingerprint in two lines, as people compare them.
+fn fingerprint_markup(fingerprint: &str) -> String {
+    let groups: Vec<&str> = fingerprint.split(' ').collect();
+    let half = groups.len().div_ceil(2);
+    glib::markup_escape_text(&format!(
+        "{}\n{}",
+        groups[..half].join(" "),
+        groups[half..].join(" ")
+    ))
+    .to_string()
+}
+
+pub fn show(window: &Rc<Window>, conversation: ConversationProxy<'static>, own_jid: String) {
+    let dialog = adw::PreferencesDialog::builder()
+        .title("Encryption")
+        .build();
+    let page = adw::PreferencesPage::new();
+    dialog.add(&page);
+
+    let settings = adw::PreferencesGroup::new();
+    let wanted = adw::SwitchRow::builder().title("Encrypt Messages").build();
+    settings.add(&wanted);
+    page.add(&settings);
+
+    let own = adw::PreferencesGroup::builder()
+        .title("This Device")
+        .description("Contacts see this fingerprint for you")
+        .build();
+    page.add(&own);
+    let theirs = adw::PreferencesGroup::builder()
+        .title("Contact’s Devices")
+        .description("Compare fingerprints with your contact, in person or over a call, before marking them verified")
+        .build();
+    page.add(&theirs);
+    let mine = adw::PreferencesGroup::builder()
+        .title("Your Other Devices")
+        .build();
+    page.add(&mine);
+
+    let path = account_path(conversation.inner().path().as_str());
+    let weak = Rc::downgrade(window);
+    let window_dialog = dialog.clone();
+    glib::spawn_future_local(async move {
+        let Ok(bus) = client::bus().await else { return };
+        let conv = conversation.clone();
+        let loaded = run(async move {
+            let omemo = OmemoProxy::builder(&bus)
+                .path(path)?
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .build()
+                .await?;
+            let peer = conv.peer().await?;
+            let wanted = conv.encryption_wanted().await?;
+            let encryption = conv.encryption().await?;
+            let fingerprint = omemo.fingerprint().await?;
+            Ok::<_, zbus::Error>((omemo, peer, wanted, encryption, fingerprint))
+        })
+        .await;
+        let (omemo, peer, is_wanted, encryption, fingerprint) = match loaded {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(w) = weak.upgrade() {
+                    w.toast(&client::explain(&e));
+                }
+                window_dialog.close();
+                return;
+            }
+        };
+        wanted.set_active(is_wanted);
+        wanted.set_subtitle(match (is_wanted, encryption.as_str()) {
+            (true, "omemo") => "Messages are end-to-end encrypted with OMEMO",
+            (true, _) => "This contact’s apps don’t support OMEMO, so messages are not encrypted",
+            (false, _) => "Messages are not encrypted",
+        });
+        let conv = conversation.clone();
+        wanted.connect_active_notify(move |row| {
+            let (conv, on) = (conv.clone(), row.is_active());
+            glib::spawn_future_local(async move {
+                let _ = run(async move { conv.set_encryption_wanted(on).await }).await;
+            });
+        });
+
+        own.add(
+            &adw::ActionRow::builder()
+                .title(fingerprint_markup(&fingerprint))
+                .css_classes(["fingerprint"])
+                .build(),
+        );
+        theirs.set_title(&glib::markup_escape_text(&format!("{peer}’s Devices")));
+        fill(&theirs, &omemo, &peer).await;
+        fill(&mine, &omemo, &own_jid).await;
+    });
+    dialog.present(Some(&window.window));
+}
+
+/// Adds a row per device of `jid` to `group`, with a switch for trust.
+async fn fill(group: &adw::PreferencesGroup, omemo: &OmemoProxy<'static>, jid: &str) {
+    let (o, j) = (omemo.clone(), jid.to_owned());
+    let devices = run(async move { o.get_devices(&j).await })
+        .await
+        .unwrap_or_default();
+    if devices.is_empty() {
+        group.add(
+            &adw::ActionRow::builder()
+                .title("No devices with OMEMO")
+                .css_classes(["dim-label"])
+                .build(),
+        );
+        return;
+    }
+    for d in devices {
+        let id = d
+            .get("device-id")
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0);
+        let active = d
+            .get("active")
+            .and_then(|v| bool::try_from(v).ok())
+            .unwrap_or(true);
+        let trust = text(&d, "trust");
+        let fingerprint = text(&d, "fingerprint");
+        let row = adw::ActionRow::builder()
+            .title(if fingerprint.is_empty() {
+                format!("Device {id}")
+            } else {
+                fingerprint_markup(&fingerprint)
+            })
+            .subtitle(trust_text(&trust, active))
+            .css_classes(["fingerprint"])
+            .build();
+        let switch = gtk::Switch::builder()
+            .valign(gtk::Align::Center)
+            .tooltip_text("Trusted")
+            .active(trust == "verified" || trust == "blind")
+            .sensitive(!fingerprint.is_empty())
+            .build();
+        row.add_suffix(&switch);
+        let (o, j, r) = (omemo.clone(), jid.to_owned(), row.clone());
+        switch.connect_state_set(move |_, on| {
+            let (o, j, r) = (o.clone(), j.clone(), r.clone());
+            let trust = if on { "verified" } else { "untrusted" };
+            glib::spawn_future_local(async move {
+                if run(async move { o.set_trust(&j, id, trust).await })
+                    .await
+                    .is_ok()
+                {
+                    r.set_subtitle(trust_text(trust, active));
+                }
+            });
+            glib::Propagation::Proceed
+        });
+        group.add(&row);
+    }
+}

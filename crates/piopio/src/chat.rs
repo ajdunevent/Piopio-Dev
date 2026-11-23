@@ -20,6 +20,8 @@ const PAGE: u32 = 50;
 pub struct ChatPage {
     pub page: adw::NavigationPage,
     proxy: ConversationProxy<'static>,
+    own_jid: String,
+    lock: gtk::Button,
     messages: gtk::ListBox,
     scroller: gtk::ScrolledWindow,
     entry: gtk::Entry,
@@ -34,10 +36,15 @@ impl ChatPage {
     pub fn new(
         window: &Rc<Window>,
         proxy: ConversationProxy<'static>,
-        _own_jid: String,
+        own_jid: String,
     ) -> Rc<Self> {
         let title = adw::WindowTitle::new("", "");
+        let lock = gtk::Button::builder()
+            .icon_name("channel-insecure-symbolic")
+            .tooltip_text("Not Encrypted")
+            .build();
         let header = adw::HeaderBar::builder().title_widget(&title).build();
+        header.pack_end(&lock);
 
         let messages = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -57,7 +64,7 @@ impl ChatPage {
 
         let entry = gtk::Entry::builder()
             .hexpand(true)
-            .placeholder_text("Message")
+            .placeholder_text("Unencrypted Message")
             .input_hints(gtk::InputHints::SPELLCHECK | gtk::InputHints::EMOJI)
             .build();
         let send = gtk::Button::builder()
@@ -91,6 +98,8 @@ impl ChatPage {
         let this = Rc::new(Self {
             page,
             proxy: proxy.clone(),
+            own_jid,
+            lock: lock.clone(),
             messages,
             scroller,
             entry: entry.clone(),
@@ -117,6 +126,14 @@ impl ChatPage {
         });
         send.connect_clicked(move |_| do_send());
 
+        let weak = Rc::downgrade(&this);
+        let window_weak = Rc::downgrade(window);
+        lock.connect_clicked(move |_| {
+            if let (Some(this), Some(window)) = (weak.upgrade(), window_weak.upgrade()) {
+                crate::encryption::show(&window, this.proxy.clone(), this.own_jid.clone());
+            }
+        });
+
         // Load older messages when scrolled to the top.
         let weak = Rc::downgrade(&this);
         this.scroller.connect_edge_reached(move |_, edge| {
@@ -141,6 +158,7 @@ impl ChatPage {
                 title.set_subtitle(if name == peer { "" } else { &peer });
                 this.page.set_title(&name);
             }
+            this.follow_encryption();
             this.load_older().await;
             this.scroll_to_end();
             let proxy = this.proxy.clone();
@@ -192,6 +210,43 @@ impl ChatPage {
         });
     }
 
+    /// Keeps the lock and the composer's hint in step with Encryption.
+    fn follow_encryption(self: &Rc<Self>) {
+        let changes = {
+            let proxy = self.proxy.clone();
+            client::forward(move || async move {
+                let first = proxy.encryption().await.unwrap_or_default();
+                let later = proxy.receive_encryption_changed().await;
+                Some(
+                    futures_util::stream::once(async move { first })
+                        .chain(later.filter_map(|c| async move { c.get().await.ok() })),
+                )
+            })
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(encryption) = changes.recv().await {
+                let Some(this) = weak.upgrade() else { break };
+                let encrypted = encryption == "omemo";
+                this.lock.set_icon_name(if encrypted {
+                    "channel-secure-symbolic"
+                } else {
+                    "channel-insecure-symbolic"
+                });
+                this.lock.set_tooltip_text(Some(if encrypted {
+                    "Encrypted"
+                } else {
+                    "Not Encrypted"
+                }));
+                this.entry.set_placeholder_text(Some(if encrypted {
+                    "Encrypted Message"
+                } else {
+                    "Unencrypted Message"
+                }));
+            }
+        });
+    }
+
     async fn load_older(self: &Rc<Self>) {
         if self.loading.get() || self.at_start.get() {
             return;
@@ -233,8 +288,19 @@ impl ChatPage {
             .get("outgoing")
             .and_then(|v| bool::try_from(v).ok())
             .unwrap_or(false);
+        let encryption = text(m, "encryption");
+        let undecryptable = encryption == "omemo-failed";
         let body = gtk::Label::builder()
-            .label(text(m, "body"))
+            .label(if undecryptable {
+                "This message was encrypted for other devices and can’t be read here.".to_owned()
+            } else {
+                text(m, "body")
+            })
+            .css_classes(if undecryptable {
+                vec!["undecryptable"]
+            } else {
+                vec![]
+            })
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
             .selectable(true)
@@ -248,6 +314,15 @@ impl ChatPage {
             .spacing(4)
             .halign(gtk::Align::End)
             .build();
+        if encryption == "omemo-untrusted" {
+            meta.append(
+                &gtk::Image::builder()
+                    .icon_name("dialog-warning-symbolic")
+                    .tooltip_text("Sent from a device you haven’t trusted")
+                    .pixel_size(12)
+                    .build(),
+            );
+        }
         meta.append(&time);
         if outgoing {
             let state = text(m, "state");
