@@ -9,6 +9,7 @@ mod client;
 mod details;
 mod dialogs;
 mod encryption;
+mod prefs;
 mod styling;
 mod timefmt;
 mod window;
@@ -97,6 +98,8 @@ fn main() -> glib::ExitCode {
         ("accounts", 2),
         ("about", 3),
         ("join-room", 4),
+        ("preferences", 5),
+        ("quit-fully", 6),
     ] {
         let ensure = ensure.clone();
         action(
@@ -109,6 +112,8 @@ fn main() -> glib::ExitCode {
                     1 => dialogs::add_account(&w),
                     2 => dialogs::accounts(&w),
                     4 => dialogs::join_room(&w),
+                    5 => crate::prefs::show(&w),
+                    6 => dialogs::quit_fully(&w),
                     _ => dialogs::about(&w),
                 }
             }),
@@ -128,36 +133,6 @@ fn main() -> glib::ExitCode {
             }),
             Some(glib::VariantTy::STRING),
         );
-    }
-    {
-        // Status for every account: available, away or do not disturb.
-        let status = gio::SimpleAction::new_stateful(
-            "status",
-            Some(glib::VariantTy::STRING),
-            &"available".to_variant(),
-        );
-        let ensure = ensure.clone();
-        let app2 = app.clone();
-        status.connect_change_state(move |a, value| {
-            let Some(show) = value.and_then(|v| v.get::<String>()) else {
-                return;
-            };
-            a.set_state(&show.to_variant());
-            let w = ensure(&app2);
-            let accounts: Vec<_> = w
-                .accounts
-                .borrow()
-                .iter()
-                .map(|i| i.proxy.clone())
-                .collect();
-            glib::spawn_future_local(async move {
-                for proxy in accounts {
-                    let show = show.clone();
-                    let _ = client::run(async move { proxy.set_presence((&show, "")).await }).await;
-                }
-            });
-        });
-        app.add_action(&status);
     }
     {
         // From a call notification.
@@ -180,6 +155,7 @@ fn main() -> glib::ExitCode {
     }
     app.set_accels_for_action("app.new-chat", &["<Control>n"]);
     app.set_accels_for_action("app.join-room", &["<Control>j"]);
+    app.set_accels_for_action("app.preferences", &["<Control>comma"]);
     app.set_accels_for_action("window.close", &["<Control>w"]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
     let quit = gio::SimpleAction::new("quit", None);

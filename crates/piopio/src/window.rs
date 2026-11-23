@@ -56,10 +56,6 @@ pub struct Window {
     open: RefCell<Option<(String, Rc<ChatPage>)>>,
     /// Shown when no conversation is open.
     placeholder: adw::NavigationPage,
-    /// The Status button's dot.
-    status_dot: gtk::Box,
-    /// Whether any account is connected (the dot is grey otherwise).
-    online: std::cell::Cell<bool>,
 }
 
 impl Window {
@@ -108,20 +104,17 @@ impl Window {
         sidebar_stack.set_visible_child_name("loading");
 
         let menu = gtk::gio::Menu::new();
-        menu.append(Some("_Accounts"), Some("app.accounts"));
-        menu.append(Some("_About Piopio"), Some("app.about"));
+        let main = gtk::gio::Menu::new();
+        main.append(Some("_Preferences"), Some("app.preferences"));
+        main.append(Some("_Accounts"), Some("app.accounts"));
+        main.append(Some("_About Piopio"), Some("app.about"));
+        menu.append_section(None, &main);
+        let quit = gtk::gio::Menu::new();
+        quit.append(Some("_Quit"), Some("app.quit-fully"));
+        menu.append_section(None, &quit);
         let new = gtk::gio::Menu::new();
         new.append(Some("_New Chat…"), Some("app.new-chat"));
         new.append(Some("_Join Group Chat…"), Some("app.join-room"));
-        let status = gtk::gio::Menu::new();
-        status.append(Some("_Available"), Some("app.status::available"));
-        status.append(Some("A_way"), Some("app.status::away"));
-        status.append(Some("_Do Not Disturb"), Some("app.status::dnd"));
-        let status_dot = gtk::Box::builder()
-            .css_classes(["status-dot"])
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build();
         let header = adw::HeaderBar::new();
         header.pack_start(
             &gtk::MenuButton::builder()
@@ -138,15 +131,6 @@ impl Window {
                 .primary(true)
                 .build(),
         );
-        header.pack_end(
-            &gtk::MenuButton::builder()
-                .child(&status_dot)
-                .tooltip_text("Status")
-                .css_classes(["flat", "image-button"])
-                .menu_model(&status)
-                .build(),
-        );
-
         let banner = adw::Banner::new("");
         banner.set_revealed(false);
 
@@ -207,23 +191,8 @@ impl Window {
             accounts: RefCell::new(Vec::new()),
             open: RefCell::new(None),
             placeholder,
-            status_dot,
-            online: std::cell::Cell::new(false),
         });
 
-        // The dot follows the chosen status, and turns grey while offline.
-        if let Some(action) = app
-            .lookup_action("status")
-            .and_then(|a| a.downcast::<gtk::gio::SimpleAction>().ok())
-        {
-            let weak = Rc::downgrade(&this);
-            action.connect_state_notify(move |_| {
-                if let Some(this) = weak.upgrade() {
-                    this.update_status_dot();
-                }
-            });
-        }
-        this.update_status_dot();
         let weak = Rc::downgrade(&this);
         crate::timefmt::on_change(move || {
             if let Some(this) = weak.upgrade() {
@@ -252,29 +221,6 @@ impl Window {
         this
     }
 
-    fn update_status_dot(&self) {
-        let show = self
-            .window
-            .application()
-            .and_then(|a| a.lookup_action("status"))
-            .and_then(|a| a.state())
-            .and_then(|s| s.get::<String>())
-            .unwrap_or_else(|| "available".into());
-        let (class, name) = if !self.online.get() {
-            ("offline", "Offline")
-        } else {
-            match show.as_str() {
-                "away" | "xa" => ("away", "Away"),
-                "dnd" => ("dnd", "Do Not Disturb"),
-                _ => ("available", "Available"),
-            }
-        };
-        self.status_dot.set_css_classes(&["status-dot", class]);
-        if let Some(button) = self.status_dot.parent() {
-            button.set_tooltip_text(Some(&format!("Status: {name}")));
-        }
-    }
-
     pub fn toast(&self, text: &str) {
         self.toasts.add_toast(adw::Toast::new(text));
     }
@@ -295,23 +241,6 @@ impl Window {
         };
         for path in paths {
             self.add_account_info(path).await;
-        }
-        // Start the Status menu where the accounts are.
-        let first = self.accounts.borrow().first().map(|a| a.proxy.clone());
-        if let Some(proxy) = first
-            && let Ok((show, _)) = run(async move { proxy.presence().await }).await
-            && let Some(action) = self
-                .window
-                .application()
-                .and_then(|a| a.lookup_action("status"))
-                .and_then(|a| a.downcast::<gtk::gio::SimpleAction>().ok())
-        {
-            let show = if show == "xa" {
-                "away".to_owned()
-            } else {
-                show
-            };
-            action.set_state(&show.to_variant());
         }
         self.watch_objects(bus.clone());
         self.load_conversations(&bus).await;
@@ -455,7 +384,6 @@ impl Window {
     async fn update_banner(&self) {
         let accounts: Vec<Rc<AccountInfo>> = self.accounts.borrow().clone();
         let mut problems = Vec::new();
-        let mut online = false;
         for account in accounts {
             let proxy = account.proxy.clone();
             let status = run(async move {
@@ -467,7 +395,7 @@ impl Window {
             .await;
             match status {
                 (false, _, _) => {}
-                (true, state, _) if state == "connected" => online = true,
+                (true, state, _) if state == "connected" => {}
                 (true, state, error) if state == "error" => {
                     problems.push(format!("{}: {error}", account.jid));
                 }
@@ -477,8 +405,6 @@ impl Window {
                 (true, _, _) => problems.push(format!("Connecting {}…", account.jid)),
             }
         }
-        self.online.set(online);
-        self.update_status_dot();
         if problems.is_empty() {
             self.banner.set_revealed(false);
         } else {

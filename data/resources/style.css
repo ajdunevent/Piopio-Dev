@@ -1,6 +1,9 @@
 /* Piopio's styles. Named colors (@accent_bg_color and so on) keep this
    working on the older libadwaita used for development builds. */
 
+/* Avatars are rounded squares, as XMPP clients draw them. */
+avatar { border-radius: 22%; }
+
 /* The conversation list, after Dino's. */
 .conversation-list > row { padding: 0; }
 .conversation-row { padding: 8px 6px; }

@@ -625,58 +625,6 @@ pub fn accounts(window: &Rc<Window>) {
         });
     }
 
-    // Defaults for every conversation; each can override them in its details.
-    let several = window.accounts.borrow().len() > 1;
-    for account in window.accounts.borrow().iter().cloned() {
-        let privacy = adw::PreferencesGroup::builder()
-            .title("Privacy")
-            .description(if several {
-                format!(
-                    "{}. Conversations can change these in their details.",
-                    glib::markup_escape_text(&account.jid)
-                )
-            } else {
-                "Conversations can change these in their details.".to_owned()
-            })
-            .build();
-        let typing = adw::SwitchRow::builder()
-            .title("Send Typing Notifications")
-            .subtitle("Let contacts see when you’re writing")
-            .build();
-        let receipts = adw::SwitchRow::builder()
-            .title("Send Read Receipts")
-            .subtitle("Let contacts see when you’ve read their messages")
-            .build();
-        privacy.add(&typing);
-        privacy.add(&receipts);
-        page.add(&privacy);
-        let (proxy, t, r) = (account.proxy.clone(), typing.clone(), receipts.clone());
-        glib::spawn_future_local(async move {
-            let (typing_on, receipts_on) = run(async move {
-                (
-                    proxy.send_chat_states().await.unwrap_or(true),
-                    proxy.send_receipts().await.unwrap_or(true),
-                )
-            })
-            .await;
-            t.set_active(typing_on);
-            r.set_active(receipts_on);
-            let proxy = account.proxy.clone();
-            t.connect_active_notify(move |row| {
-                let (proxy, on) = (proxy.clone(), row.is_active());
-                glib::spawn_future_local(async move {
-                    let _ = run(async move { proxy.set_send_chat_states(on).await }).await;
-                });
-            });
-            let proxy = account.proxy.clone();
-            r.connect_active_notify(move |row| {
-                let (proxy, on) = (proxy.clone(), row.is_active());
-                glib::spawn_future_local(async move {
-                    let _ = run(async move { proxy.set_send_receipts(on).await }).await;
-                });
-            });
-        });
-    }
     dialog.present(Some(&window.window));
 }
 
@@ -704,6 +652,35 @@ pub fn subscription_request(window: &Rc<Window>, account: &Rc<AccountInfo>, jid:
                 }
             })
             .await;
+        });
+    });
+    ask.present(Some(&window.window));
+}
+
+/// Quit fully: the window and the background service, after a warning.
+pub fn quit_fully(window: &Rc<Window>) {
+    let ask = adw::AlertDialog::new(
+        Some("Quit Piopio?"),
+        Some(
+            "This will fully exit and you won’t be able to receive new messages until Piopio is started again.",
+        ),
+    );
+    ask.add_responses(&[("cancel", "_Cancel"), ("quit", "_Quit")]);
+    ask.set_response_appearance("quit", adw::ResponseAppearance::Destructive);
+    ask.set_default_response(Some("cancel"));
+    let w = Rc::downgrade(window);
+    ask.connect_response(None, move |_, response| {
+        if response != "quit" {
+            return;
+        }
+        let Some(w) = w.upgrade() else { return };
+        glib::spawn_future_local(async move {
+            if let Ok(bus) = client::bus().await {
+                let _ = run(async move { DaemonProxy::new(&bus).await?.quit().await }).await;
+            }
+            if let Some(app) = w.window.application() {
+                app.quit();
+            }
         });
     });
     ask.present(Some(&window.window));

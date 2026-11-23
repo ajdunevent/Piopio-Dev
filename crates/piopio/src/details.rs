@@ -31,6 +31,8 @@ struct Loaded {
     chat_states: String,
     receipts: String,
     blocked: bool,
+    sound: String,
+    override_quiet: bool,
     /// The account's defaults for typing notifications and read receipts.
     default_chat_states: bool,
     default_receipts: bool,
@@ -88,6 +90,11 @@ async fn load(
                 .unwrap_or_else(|_| "default".into()),
             receipts: c.send_receipts().await.unwrap_or_else(|_| "default".into()),
             blocked: c.blocked().await.unwrap_or(false),
+            sound: c
+                .notification_sound()
+                .await
+                .unwrap_or_else(|_| "default".into()),
+            override_quiet: c.override_quiet().await.unwrap_or(false),
             default_chat_states: proxy.send_chat_states().await.unwrap_or(true),
             default_receipts: proxy.send_receipts().await.unwrap_or(true),
             can_block: {
@@ -285,6 +292,9 @@ fn build(
     let settings = adw::PreferencesGroup::builder()
         .title("Conversation")
         .build();
+    let notifications = adw::PreferencesGroup::builder()
+        .title("Notifications")
+        .build();
     let pin = adw::SwitchRow::builder()
         .title("Pin to Top")
         .active(d.pinned)
@@ -317,7 +327,7 @@ fn build(
             let p = p.clone();
             apply(&w, async move { p.set_muted(value).await });
         });
-        settings.add(&notify);
+        notifications.add(&notify);
     } else {
         let mute = adw::SwitchRow::builder()
             .title("Mute Notifications")
@@ -329,7 +339,7 @@ fn build(
             let p = p.clone();
             apply(&w, async move { p.set_muted(value).await });
         });
-        settings.add(&mute);
+        notifications.add(&mute);
 
         let typing = override_row(
             "Send Typing Notifications",
@@ -358,6 +368,27 @@ fn build(
         settings.add(&receipts);
     }
     page.add(&settings);
+
+    notifications.add(&crate::prefs::sound_row(
+        window,
+        "Default",
+        &d.sound,
+        crate::prefs::SoundTarget::Conversation(proxy.clone()),
+    ));
+    let urgent = adw::SwitchRow::builder()
+        .title("Ring Through Do Not Disturb")
+        .subtitle("Also through Quiet and Silent on phones")
+        .active(d.override_quiet)
+        .build();
+    {
+        let (w, p) = (window.clone(), proxy.clone());
+        urgent.connect_active_notify(move |row| {
+            let (p, on) = (p.clone(), row.is_active());
+            apply(&w, async move { p.set_override_quiet(on).await });
+        });
+    }
+    notifications.add(&urgent);
+    page.add(&notifications);
 
     // Block and delete.
     let actions = gtk::Box::builder()
