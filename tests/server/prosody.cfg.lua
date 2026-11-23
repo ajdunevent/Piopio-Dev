@@ -8,6 +8,7 @@ run_as_root = true
 prosody_user = os.getenv("USER") or "root"
 pidfile = dir .. "/prosody.pid"
 data_path = dir .. "/data"
+certificates = dir .. "/certs"
 log = { debug = dir .. "/prosody.log" }
 
 admins = {}
