@@ -12,6 +12,7 @@ mod connect;
 mod daemon;
 mod disco;
 mod files;
+mod jingle;
 mod jingle_sdp;
 mod login;
 mod messages;

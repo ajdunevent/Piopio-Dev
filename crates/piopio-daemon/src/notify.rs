@@ -48,6 +48,11 @@ pub async fn message(session: &Session, conversation: &OwnedObjectPath, row: &Me
     );
     notification.insert("category", Value::from("im.received"));
     let id = conversation.as_str().replace('/', "-");
+    show(session, &id, notification).await;
+}
+
+async fn show(session: &Session, id: &str, notification: HashMap<&str, Value<'_>>) {
+    let id = id.replace('/', "-");
     let result = session
         .bus
         .call_method(
@@ -73,4 +78,32 @@ async fn muted(session: &Session, conversation: &OwnedObjectPath) -> bool {
         return false;
     };
     iface.get().await.muted_setting() == "always"
+}
+
+/// An incoming call: a notification that opens the call, even with no
+/// window open (the window shows its own ringing).
+pub async fn incoming_call(
+    session: &Session,
+    from: &tokio_xmpp::jid::BareJid,
+    video: bool,
+    call: &OwnedObjectPath,
+) {
+    if crate::activity::ui_present() {
+        return;
+    }
+    let name = crate::roster::display_name(session, from.as_str()).await;
+    let mut notification: HashMap<&str, Value<'_>> = HashMap::new();
+    notification.insert("title", Value::from(name));
+    notification.insert(
+        "body",
+        Value::from(if video { "Video call" } else { "Call" }),
+    );
+    notification.insert("priority", Value::from("urgent"));
+    notification.insert("category", Value::from("call.incoming"));
+    notification.insert("default-action", Value::from("app.open-call"));
+    notification.insert(
+        "default-action-target",
+        Value::from(call.as_str().to_owned()),
+    );
+    show(session, &format!("call-{}", call.as_str()), notification).await;
 }

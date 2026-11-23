@@ -2352,6 +2352,7 @@ dependencies = [
  "getrandom 0.3.4",
  "image",
  "oo7",
+ "piopio-call",
  "piopio-dbus",
  "piopio-omemo",
  "reqwest",

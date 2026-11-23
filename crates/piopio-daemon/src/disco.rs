@@ -31,6 +31,14 @@ pub const FEATURES: &[&str] = &[
     "urn:xmpp:bookmarks:1+notify",
     "urn:xmpp:avatar:metadata+notify",
     "http://jabber.org/protocol/chatstates",
+    "urn:xmpp:jingle:1",
+    "urn:xmpp:jingle:apps:rtp:1",
+    "urn:xmpp:jingle:apps:rtp:audio",
+    "urn:xmpp:jingle:apps:rtp:video",
+    "urn:xmpp:jingle:transports:ice-udp:1",
+    "urn:xmpp:jingle:apps:dtls:0",
+    "urn:xmpp:jingle:apps:grouping:0",
+    "urn:xmpp:jingle-message:0",
 ];
 
 /// The node our entity capabilities (XEP-0115) point at.

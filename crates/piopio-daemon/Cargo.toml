@@ -31,4 +31,5 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zbus = { version = "5.13.2", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+piopio-call = { path = "../piopio-call" }
 tempfile = "3.27.0"

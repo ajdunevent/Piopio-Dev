@@ -140,6 +140,23 @@ impl AccountObject {
         Ok(path)
     }
 
+    /// Calls someone (all their devices ring). Returns the call's path;
+    /// the UI then provides the offer with Call.SetLocalDescription.
+    async fn start_call(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        jid: &str,
+        video: bool,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        access::check(&header)?;
+        let peer: BareJid = jid
+            .parse()
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("not a valid JID: {e}")))?;
+        crate::jingle::start(&self.session, peer, video)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(format!("{e:#}")))
+    }
+
     /// Someone invited us to a group chat (room, who, reason, password).
     #[zbus(signal)]
     pub async fn room_invitation(

@@ -112,6 +112,9 @@ pub trait Account {
     /// Changes the password on the server, then uses it.
     fn change_password(&self, new: &str) -> zbus::Result<()>;
 
+    /// Calls someone; returns the call's path.
+    fn start_call(&self, jid: &str, video: bool) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+
     /// Someone invited us to a group chat.
     #[zbus(signal)]
     fn room_invitation(
@@ -322,6 +325,47 @@ pub trait Omemo {
     fn devices_changed(&self, jid: &str) -> zbus::Result<()>;
 
     /// Version of this interface.
+    #[zbus(property)]
+    fn api_version(&self) -> zbus::Result<u32>;
+}
+
+/// Version of the Call interface implemented by this build.
+pub const CALL_API_VERSION: u32 = 1;
+
+/// Client side of `net.dunevent.Piopio.Call`, at `<account>/call/<n>`.
+/// The UI runs the media and passes SDP and ICE candidates through it.
+#[zbus::proxy(
+    interface = "net.dunevent.Piopio.Call",
+    default_service = "net.dunevent.Piopio.Daemon"
+)]
+pub trait Call {
+    #[zbus(property)]
+    fn peer(&self) -> zbus::Result<String>;
+    /// incoming or outgoing.
+    #[zbus(property)]
+    fn direction(&self) -> zbus::Result<String>;
+    /// ringing, calling, connecting, active or ended.
+    #[zbus(property)]
+    fn state(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn end_reason(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn video(&self) -> zbus::Result<bool>;
+
+    /// Answers an incoming call; the offer follows as RemoteDescription.
+    fn accept(&self) -> zbus::Result<()>;
+    /// Declines, cancels or hangs up.
+    fn hangup(&self) -> zbus::Result<()>;
+    /// Our offer (outgoing) or answer (incoming), as SDP.
+    fn set_local_description(&self, kind: &str, description: &str) -> zbus::Result<()>;
+    /// One of our ICE candidates.
+    fn add_local_candidate(&self, mline: u32, candidate: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn remote_description(&self, kind: &str, description: &str) -> zbus::Result<()>;
+    #[zbus(signal)]
+    fn remote_candidate(&self, mline: u32, candidate: &str) -> zbus::Result<()>;
+
     #[zbus(property)]
     fn api_version(&self) -> zbus::Result<u32>;
 }

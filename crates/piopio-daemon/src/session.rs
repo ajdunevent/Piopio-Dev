@@ -80,6 +80,7 @@ pub struct Shared {
     pub omemo: crate::omemo::OmemoState,
     pub rooms: crate::rooms::Rooms,
     pub uploads: crate::files::Uploads,
+    pub calls: crate::jingle::Calls,
 }
 
 /// Handle used by everything outside the session task.
@@ -150,6 +151,7 @@ pub fn new_shared(
         omemo: crate::omemo::OmemoState::default(),
         rooms: crate::rooms::Rooms::default(),
         uploads: crate::files::Uploads::default(),
+        calls: crate::jingle::Calls::default(),
     })
 }
 
@@ -283,6 +285,8 @@ async fn run(
                 }
                 Some(Event::Stream(StreamEvent::Suspended)) => {
                     tracing::info!(jid = %shared.jid, "connection lost, reconnecting");
+                    let s = shared.clone();
+                    tokio::spawn(async move { crate::jingle::offline(&s).await });
                     connected = false;
                     shared.online.send_replace(false);
                     set_state(&iface, State::Connecting, None).await;
@@ -374,7 +378,9 @@ async fn handle_stanza(shared: &Session, stanza: Stanza) {
         Stanza::Iq(Iq::Set {
             from, id, payload, ..
         }) => {
-            let reply = if payload.is("query", ns::ROSTER) {
+            let reply = if payload.is("jingle", crate::jingle_sdp::JINGLE) {
+                crate::jingle::iq(shared, from, id, payload).await
+            } else if payload.is("query", ns::ROSTER) {
                 if shared.is_own(from.as_ref()) {
                     roster::push(shared, payload).await;
                     result(from, id)

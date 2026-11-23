@@ -447,6 +447,11 @@ async fn handle(
         peer.to_string()
     };
 
+    // Calls: Jingle Message Initiation, only as it happens.
+    if source == Source::Live && crate::jingle::message(session, &message, outgoing).await {
+        return;
+    }
+
     // OMEMO 2: open the envelope first, so what it carries (body, replies,
     // corrections) is handled like the same elements in the clear.
     let mut v2_label: Option<&'static str> = None;
