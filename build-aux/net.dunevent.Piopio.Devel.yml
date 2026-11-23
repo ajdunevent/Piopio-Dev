@@ -38,6 +38,8 @@ modules:
       - install -Dm644 data/net.dunevent.Piopio.Daemon.service -t /app/share/dbus-1/services
       - install -Dm644 data/icons/hicolor/scalable/apps/net.dunevent.Piopio.svg -t /app/share/icons/hicolor/scalable/apps
       - install -Dm644 data/icons/hicolor/symbolic/apps/net.dunevent.Piopio-symbolic.svg -t /app/share/icons/hicolor/symbolic/apps
+      # Release builds leave gigabytes of intermediate files behind.
+      - rm -rf target cargo
     sources:
       - type: dir
         path: ..

@@ -37,8 +37,18 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
-      options: --privileged
+      # The runner's disk is nearly full of preinstalled SDKs we don't use;
+      # mount them so the first step can delete them.
+      options: >-
+        --privileged
+        -v /usr/local/lib/android:/host/android
+        -v /usr/share/dotnet:/host/dotnet
+        -v /opt/hostedtoolcache:/host/toolcache
     steps:
+      - name: Free disk space
+        run: |
+          rm -rf /host/android/* /host/dotnet/* /host/toolcache/*
+          df -h /
       - uses: actions/checkout@v4
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
