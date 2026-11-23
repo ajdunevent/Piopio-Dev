@@ -145,9 +145,9 @@ pub fn unquote(fallback: &str) -> String {
     )
 }
 
-/// Applies a retraction. Returns whether `target` was found.
-pub async fn retract(session: &Session, conversation: i64, target: MessageRow, outgoing: bool) {
-    if target.outgoing != outgoing || target.retracted {
+/// Applies a retraction, if `sender` wrote the message.
+pub async fn retract(session: &Session, conversation: i64, target: MessageRow, sender: &str) {
+    if target.sender != sender || target.retracted {
         tracing::info!("retraction of someone else's message ignored");
         return;
     }
@@ -187,11 +187,11 @@ pub async fn correct(
     session: &Session,
     conversation: i64,
     target: Option<MessageRow>,
-    outgoing: bool,
+    sender: &str,
     body: String,
 ) -> bool {
     let Some(target) = target else { return false };
-    if target.outgoing != outgoing {
+    if target.sender != sender {
         tracing::info!("correction of someone else's message ignored");
         return true;
     }

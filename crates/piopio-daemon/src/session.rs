@@ -78,6 +78,7 @@ pub struct Shared {
     /// "chat", "dnd" or "xa".
     pub presence: Mutex<(String, String)>,
     pub omemo: crate::omemo::OmemoState,
+    pub rooms: crate::rooms::Rooms,
 }
 
 /// Handle used by everything outside the session task.
@@ -146,6 +147,7 @@ pub fn new_shared(
         conversations: messages::Conversations::default(),
         presence: Mutex::new(("available".into(), String::new())),
         omemo: crate::omemo::OmemoState::default(),
+        rooms: crate::rooms::Rooms::default(),
     })
 }
 
@@ -325,6 +327,7 @@ async fn came_online(shared: Session, features: StreamFeatures) {
     send_presence(&shared).await;
     let _ = features;
     crate::omemo::online(&shared).await;
+    crate::rooms::online(&shared).await;
     messages::catch_up(&shared).await;
 }
 
@@ -380,7 +383,11 @@ async fn handle_stanza(shared: &Session, stanza: Stanza) {
             shared.send(reply).await;
         }
         Stanza::Message(message) => messages::incoming(shared, message).await,
-        Stanza::Presence(presence) => roster::presence(shared, presence).await,
+        Stanza::Presence(presence) => {
+            if !crate::rooms::presence(shared, &presence).await {
+                roster::presence(shared, presence).await
+            }
+        }
     }
 }
 

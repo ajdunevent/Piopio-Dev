@@ -22,7 +22,6 @@ use base64::engine::general_purpose::STANDARD as B64;
 use tokio::sync::Mutex;
 use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::minidom::Element;
-use tokio_xmpp::parsers::iq::Iq;
 use tokio_xmpp::parsers::legacy_omemo::Encrypted;
 use tokio_xmpp::parsers::ns;
 use zbus::object_server::SignalEmitter;
@@ -31,13 +30,13 @@ use zbus::zvariant::{OwnedValue, Str};
 use piopio_omemo as omemo;
 
 use crate::access;
+use crate::pep::{fetch_item, n, set};
 use crate::session::{Session, Shared};
 
 use piopio_dbus::OMEMO_API_VERSION;
 /// Device lists of people who don't share presence with us (so send no
 /// notifications) are fetched again when older than this.
 const DEVICE_LIST_TTL: Duration = Duration::from_secs(600);
-const PUBLISH_OPTIONS: &str = "http://jabber.org/protocol/pubsub#publish-options";
 
 /// The text clients without OMEMO show instead of an encrypted message.
 pub const FALLBACK_BODY: &str = "I sent you an OMEMO encrypted message but your client doesn’t \
@@ -98,11 +97,6 @@ pub enum Outgoing {
     Failed(String),
 }
 
-/// An attribute name (all of ours are valid XML names).
-fn n(name: &'static str) -> tokio_xmpp::minidom::rxml::NcName {
-    name.try_into().expect("a valid attribute name")
-}
-
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -156,100 +150,10 @@ pub async fn own_device(shared: &Shared) -> anyhow::Result<(u32, [u8; 32])> {
 
 // --- PEP ---------------------------------------------------------------------
 
-fn pubsub(child: Element) -> Element {
-    Element::builder("pubsub", ns::PUBSUB).append(child).build()
-}
-
-fn field(var: &str, value: &str) -> Element {
-    Element::builder("field", "jabber:x:data")
-        .attr(n("var"), var)
-        .append(
-            Element::builder("value", "jabber:x:data")
-                .append(value)
-                .build(),
-        )
-        .build()
-}
-
-/// Publishes `payload` as the item `id` of `node` on our own PEP service,
-/// readable by anyone (contacts need our bundle before they know us).
+/// Publishes on our PEP service, readable by anyone: contacts need our
+/// keys before they know us.
 async fn publish(shared: &Shared, node: &str, id: &str, payload: Element) -> bool {
-    let publish = Element::builder("publish", ns::PUBSUB)
-        .attr(n("node"), node)
-        .append(
-            Element::builder("item", ns::PUBSUB)
-                .attr(n("id"), id)
-                .append(payload)
-                .build(),
-        )
-        .build();
-    let options = Element::builder("publish-options", ns::PUBSUB)
-        .append(
-            Element::builder("x", "jabber:x:data")
-                .attr(n("type"), "submit")
-                .append(field("FORM_TYPE", PUBLISH_OPTIONS))
-                .append(field("pubsub#access_model", "open"))
-                .build(),
-        )
-        .build();
-    let with_options = Element::builder("pubsub", ns::PUBSUB)
-        .append(publish.clone())
-        .append(options)
-        .build();
-    match shared.iq(set(None, with_options)).await {
-        Ok(_) => return true,
-        Err(e) => tracing::info!("publishing {node} with options failed ({e}); trying without"),
-    }
-    match shared.iq(set(None, pubsub(publish))).await {
-        Ok(_) => true,
-        Err(e) => {
-            tracing::warn!("publishing {node} failed: {e}");
-            false
-        }
-    }
-}
-
-fn set(to: Option<Jid>, payload: Element) -> Iq {
-    Iq::Set {
-        from: None,
-        to,
-        id: String::new(),
-        payload,
-    }
-}
-
-fn get(to: Option<Jid>, payload: Element) -> Iq {
-    Iq::Get {
-        from: None,
-        to,
-        id: String::new(),
-        payload,
-    }
-}
-
-/// Fetches the newest item of `node` from `jid`'s PEP service.
-async fn fetch_item(shared: &Shared, jid: &BareJid, node: &str) -> Option<Element> {
-    let to = (*jid != shared.jid).then(|| Jid::from(jid.clone()));
-    let query = pubsub(
-        Element::builder("items", ns::PUBSUB)
-            .attr(n("node"), node)
-            .attr(n("max_items"), "1")
-            .build(),
-    );
-    match shared.iq(get(to, query)).await {
-        Ok(Some(reply)) => reply
-            .get_child("items", ns::PUBSUB)?
-            .children()
-            .find(|c| c.is("item", ns::PUBSUB))?
-            .children()
-            .next()
-            .cloned(),
-        Ok(None) => None,
-        Err(e) => {
-            tracing::debug!(%jid, "fetching {node}: {e}");
-            None
-        }
-    }
+    crate::pep::publish(shared, node, id, payload, crate::pep::OPEN).await
 }
 
 fn device_ids(list: &Element) -> Vec<u32> {

@@ -97,6 +97,17 @@ const SCHEMA: &[&str] = &[
         PRIMARY KEY (message_id, sender)
     );
     "#,
+    // Version 4: group chats
+    r#"
+    CREATE TABLE rooms (
+        conversation_id INTEGER PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+        nick        TEXT NOT NULL,
+        password    TEXT NOT NULL DEFAULT '',
+        name        TEXT NOT NULL DEFAULT '',
+        autojoin    INTEGER NOT NULL DEFAULT 1,
+        mam_last_id TEXT
+    );
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -545,6 +556,66 @@ impl Store {
         })
         .await
     }
+}
+
+/// A group chat we take part in (or took part in).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoomRow {
+    pub conversation_id: i64,
+    pub nick: String,
+    pub password: String,
+    pub name: String,
+    pub autojoin: bool,
+    /// The newest archive id fetched from the room's archive.
+    pub mam_last_id: Option<String>,
+}
+
+impl Store {
+    pub async fn room(&self, conversation: i64) -> anyhow::Result<Option<RoomRow>> {
+        self.with(move |db| {
+            db.query_row(
+                "SELECT conversation_id, nick, password, name, autojoin, mam_last_id
+                 FROM rooms WHERE conversation_id = ?1",
+                [conversation],
+                room_from_row,
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn set_room(&self, room: RoomRow) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO rooms (conversation_id, nick, password, name, autojoin, mam_last_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (conversation_id) DO UPDATE SET nick = excluded.nick,
+                   password = excluded.password, name = excluded.name,
+                   autojoin = excluded.autojoin, mam_last_id = excluded.mam_last_id",
+                params![
+                    room.conversation_id,
+                    room.nick,
+                    room.password,
+                    room.name,
+                    room.autojoin,
+                    room.mam_last_id
+                ],
+            )
+            .map(drop)
+        })
+        .await
+    }
+}
+
+fn room_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RoomRow> {
+    Ok(RoomRow {
+        conversation_id: r.get(0)?,
+        nick: r.get(1)?,
+        password: r.get(2)?,
+        name: r.get(3)?,
+        autojoin: r.get(4)?,
+        mam_last_id: r.get(5)?,
+    })
 }
 
 /// What we know about one OMEMO device of a contact (or of ourselves).

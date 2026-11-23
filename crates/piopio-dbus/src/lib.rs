@@ -100,6 +100,15 @@ pub trait Account {
     /// Opens (or creates) the one-to-one conversation with `jid`.
     fn start_chat(&self, jid: &str) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
 
+    /// Joins a group chat and bookmarks it; returns its conversation's path.
+    /// An empty nick uses the account's name. Options: "password" (s).
+    fn join_room(
+        &self,
+        jid: &str,
+        nick: &str,
+        options: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+    ) -> zbus::Result<zbus::zvariant::OwnedObjectPath>;
+
     /// Changes the password on the server, then uses it.
     fn change_password(&self, new: &str) -> zbus::Result<()>;
 }
@@ -185,6 +194,43 @@ pub trait Conversation {
 
     #[zbus(signal)]
     fn message_changed(&self, id: &str, changes: Dict) -> zbus::Result<()>;
+}
+
+/// Version of the Room interface implemented by this build.
+pub const ROOM_API_VERSION: u32 = 1;
+
+/// Client side of `net.dunevent.Piopio.Room`, on group chat conversations.
+#[zbus::proxy(
+    interface = "net.dunevent.Piopio.Room",
+    default_service = "net.dunevent.Piopio.Daemon"
+)]
+pub trait Room {
+    /// Our nickname in the room.
+    #[zbus(property)]
+    fn nick(&self) -> zbus::Result<String>;
+    #[zbus(property)]
+    fn subject(&self) -> zbus::Result<String>;
+    /// joining, joined, error or left.
+    #[zbus(property)]
+    fn state(&self) -> zbus::Result<String>;
+    /// Why joining failed, when State is error.
+    #[zbus(property)]
+    fn error(&self) -> zbus::Result<String>;
+
+    /// Who is in the room. Keys: nick, jid, role, affiliation, show.
+    fn get_occupants(&self) -> zbus::Result<Vec<Dict>>;
+
+    /// Joins again, optionally with another nickname or a password.
+    fn join(&self, nick: &str, password: &str) -> zbus::Result<()>;
+
+    /// Leaves the room; its history stays.
+    fn leave(&self) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn occupants_changed(&self) -> zbus::Result<()>;
+
+    #[zbus(property)]
+    fn api_version(&self) -> zbus::Result<u32>;
 }
 
 /// Client side of `net.dunevent.Piopio.Omemo`, on each account object.

@@ -26,6 +26,8 @@ pub const FEATURES: &[&str] = &[
     "urn:xmpp:reactions:0",
     "urn:xmpp:reply:0",
     "urn:xmpp:fallback:0",
+    "http://jabber.org/protocol/muc",
+    "urn:xmpp:bookmarks:1+notify",
 ];
 
 /// The node our entity capabilities (XEP-0115) point at.

@@ -33,3 +33,9 @@ default_archive_policy = true
 smacks_hibernation_time = 30
 
 VirtualHost "localhost"
+
+Component "conference.localhost" "muc"
+    modules_enabled = { "muc_mam" }
+    restrict_room_creation = false
+    muc_room_default_persistent = false
+    muc_room_default_public = true

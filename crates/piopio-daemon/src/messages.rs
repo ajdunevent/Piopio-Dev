@@ -53,18 +53,29 @@ impl Conversations {
         Ok(())
     }
 
-    /// The conversation with `peer`, created and exported if new.
+    /// The conversation with `peer`, created (as a one-to-one chat) and
+    /// exported if new.
     pub async fn get(
         &self,
         session: &Session,
         peer: &BareJid,
+    ) -> anyhow::Result<(i64, OwnedObjectPath)> {
+        self.get_kind(session, peer, "chat").await
+    }
+
+    /// The conversation with `peer`, created as `kind` if new.
+    pub async fn get_kind(
+        &self,
+        session: &Session,
+        peer: &BareJid,
+        kind: &'static str,
     ) -> anyhow::Result<(i64, OwnedObjectPath)> {
         if let Some(found) = self.by_peer.lock().await.get(peer.as_str()) {
             return Ok(found.clone());
         }
         let (row, _) = session
             .store
-            .conversation(session.account_id, peer.to_string(), "chat")
+            .conversation(session.account_id, peer.to_string(), kind)
             .await?;
         self.export(session, row).await
     }
@@ -79,22 +90,32 @@ impl Conversations {
             return Ok(found.clone());
         }
         let path = OwnedObjectPath::try_from(format!("{}/conversation/{}", session.path, row.id))?;
-        let title = crate::roster::display_name(session, &row.peer).await;
+        let title = if row.kind == "room" {
+            room_title(session, &row).await
+        } else {
+            crate::roster::display_name(session, &row.peer).await
+        };
         let entry = (row.id, path.clone());
         map.insert(row.peer.clone(), entry.clone());
         drop(map);
+        let is_room = row.kind == "room";
+        let (id, peer) = (row.id, row.peer.clone());
         let object = ConversationObject {
             session: session.clone(),
             row,
             title,
         };
         session.bus.object_server().at(&path, object).await?;
+        if is_room {
+            crate::rooms::export(session, id, path.clone(), &peer).await;
+        }
         Ok(entry)
     }
 
     /// Unexports every conversation (when the account goes away).
     pub async fn unexport_all(&self, shared: &Shared) {
         for (_, (_, path)) in self.by_peer.lock().await.drain() {
+            crate::rooms::unexport(shared, &path).await;
             let _ = shared
                 .bus
                 .object_server()
@@ -180,11 +201,20 @@ pub async fn incoming(session: &Session, mut message: Message) {
         if crate::omemo::event(session, message.from.as_ref(), &event).await {
             return;
         }
+        if let Some(items) = event.get_child("items", ns::PUBSUB_EVENT)
+            && crate::rooms::bookmark_event(session, message.from.as_ref(), items).await
+        {
+            return;
+        }
     }
 
     // Archive results for our own queries.
     if let Ok(Some(result)) = message.extract_payload::<mam::Result_>() {
-        if !session.is_own(message.from.as_ref()) {
+        let from_room = match &message.from {
+            Some(from) => session.rooms.is_room(from.to_bare().as_str()).await,
+            None => false,
+        };
+        if !session.is_own(message.from.as_ref()) && !from_room {
             tracing::warn!(from = ?message.from, "archive result from someone else ignored");
             return;
         }
@@ -242,6 +272,10 @@ async fn handle(
     archive_id: Option<String>,
     source: Source,
 ) {
+    if message.type_ == MessageType::Groupchat {
+        handle_room(session, message, delay, archive_id, source).await;
+        return;
+    }
     let from_bare = message.from.as_ref().map(Jid::to_bare);
     let outgoing = from_bare.as_ref().is_none_or(|b| *b == session.jid);
     let peer = if outgoing {
@@ -296,7 +330,7 @@ async fn handle(
         if let Ok((conversation, _)) = session.conversations.get(session, &peer).await
             && let Ok(Some(row)) = session.store.find_message(conversation, target).await
         {
-            rich::retract(session, conversation, row, outgoing).await;
+            rich::retract(session, conversation, row, &sender_jid).await;
         }
         return;
     }
@@ -304,7 +338,7 @@ async fn handle(
         if let Ok((conversation, _)) = session.conversations.get(session, &peer).await
             && let Ok(Some(row)) = session.store.find_message(conversation, target).await
         {
-            rich::react(session, conversation, row, sender_jid, emojis).await;
+            rich::react(session, conversation, row, sender_jid.clone(), emojis).await;
         }
         return;
     }
@@ -391,7 +425,7 @@ async fn handle(
             .await
             .ok()
             .flatten();
-        if rich::correct(session, conversation, row, outgoing, body.clone()).await {
+        if rich::correct(session, conversation, row, &sender_jid, body.clone()).await {
             return;
         }
     }
@@ -449,6 +483,145 @@ async fn handle(
     {
         crate::notify::message(session, &conversation, &row).await;
     }
+}
+
+/// A group chat message (live or from the room's archive).
+async fn handle_room(
+    session: &Session,
+    mut message: Message,
+    delay: Option<Delay>,
+    archive_id: Option<String>,
+    source: Source,
+) {
+    let Some(from) = message.from.clone() else {
+        return;
+    };
+    let room = from.to_bare();
+    let Some(our_nick) = session.rooms.nick(room.as_str()).await else {
+        return; // not one of our rooms
+    };
+    let subject = message.subjects.values().next().cloned();
+    if message.bodies.is_empty()
+        && let Some(subject) = subject
+    {
+        crate::rooms::subject(session, room.as_str(), subject).await;
+        return;
+    }
+    let Some(nick) = from.resource().map(|r| r.to_string()) else {
+        return; // notices from the room itself
+    };
+    let sender = from.to_string();
+    let outgoing = nick == our_nick;
+    let Ok((conversation, _)) = session.conversations.get_kind(session, &room, "room").await else {
+        return;
+    };
+
+    if let Some(target) = rich::retraction(&message) {
+        if let Ok(Some(row)) = session.store.find_message(conversation, target).await {
+            rich::retract(session, conversation, row, &sender).await;
+        }
+        return;
+    }
+    if let Some((target, emojis)) = rich::reactions(&message) {
+        if let Ok(Some(row)) = session.store.find_message(conversation, target).await {
+            rich::react(session, conversation, row, sender.clone(), emojis).await;
+        }
+        return;
+    }
+    let replaces = rich::correction(&message);
+    let reply = rich::reply(&message);
+    let Some((_, body)) = message.get_best_body_cloned(vec![]) else {
+        return;
+    };
+    let origin = message
+        .extract_payload::<OriginId>()
+        .ok()
+        .flatten()
+        .map(|o| o.id);
+    let stanza_id = message
+        .extract_payload::<StanzaId>()
+        .ok()
+        .flatten()
+        .filter(|s| s.by.to_bare() == room && s.by.resource().is_none())
+        .map(|s| s.id);
+    let server_id = archive_id.or(stanza_id);
+    let origin_id = origin
+        .or_else(|| message.id.as_ref().map(|i| i.0.clone()))
+        .or_else(|| server_id.clone())
+        .unwrap_or_else(new_id);
+    let timestamp = delay
+        .map(|d| d.stamp.0.timestamp_millis())
+        .unwrap_or_else(now_ms);
+
+    // Our own message, reflected by the room: it got there.
+    if outgoing && source == Source::Live {
+        mark(session, &room, &origin_id, state::RECEIVED).await;
+    }
+
+    let (body, quote) = rich::strip_fallback(&message, rich::REPLY, &body);
+    if let Some(target) = replaces {
+        let row = session
+            .store
+            .find_message(conversation, target)
+            .await
+            .ok()
+            .flatten();
+        if rich::correct(session, conversation, row, &sender, body.clone()).await {
+            return;
+        }
+    }
+    let (reply_to, reply_to_sender, reply_preview) = match reply {
+        Some((id, to)) => {
+            let preview = match session.store.find_message(conversation, id.clone()).await {
+                Ok(Some(row)) if !row.retracted => rich::preview(&row.body),
+                _ => rich::unquote(&quote),
+            };
+            (id, to, preview)
+        }
+        None => Default::default(),
+    };
+    let mentions_us = !outgoing && body.to_lowercase().contains(&our_nick.to_lowercase());
+    let new = NewMessage {
+        origin_id,
+        server_id: server_id.clone(),
+        outgoing,
+        sender,
+        body,
+        timestamp,
+        state: state::RECEIVED,
+        encryption: "none",
+        reply_to,
+        reply_to_sender,
+        reply_preview,
+    };
+    let first_sync = source == (Source::Archive { first_sync: true });
+    let stored = store_message(session, &room, new, !outgoing && !first_sync).await;
+    if source == Source::Live
+        && let Some(id) = server_id
+    {
+        crate::rooms::saw_archive_id(session, room.as_str(), id).await;
+    }
+    if let Some((row, path)) = stored
+        && mentions_us
+        && !first_sync
+    {
+        crate::notify::message(session, &path, &row).await;
+    }
+}
+
+/// A room's title: its bookmark name, or the room's local part.
+async fn room_title(session: &Session, row: &ConversationRow) -> String {
+    if let Ok(Some(room)) = session.store.room(row.id).await
+        && !room.name.is_empty()
+    {
+        return room.name;
+    }
+    row.peer
+        .split('@')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&row.peer)
+        .to_owned()
 }
 
 /// Stores a message, updates its conversation and tells the UI. Returns the
@@ -611,17 +784,19 @@ pub async fn catch_up(session: &Session) {
 /// Sends a chat message carrying `body`, encrypted when OMEMO applies, plus
 /// `extra` elements. Tracked messages ask for receipts and markers. Returns
 /// the state reached and the encryption used.
+#[allow(clippy::too_many_arguments)]
 async fn deliver(
     session: &Session,
     peer: &BareJid,
+    kind: MessageType,
     wanted: bool,
     id: &str,
     body: &str,
     extra: Vec<tokio_xmpp::minidom::Element>,
     tracked: bool,
 ) -> (&'static str, &'static str) {
-    let mut message =
-        Message::chat(Some(Jid::from(peer.clone()))).with_payload(OriginId { id: id.to_owned() });
+    let mut message = Message::new_with_type(kind, Some(Jid::from(peer.clone())))
+        .with_payload(OriginId { id: id.to_owned() });
     if tracked {
         message = message
             .with_payload(receipts::Request)
@@ -661,12 +836,13 @@ async fn deliver(
 async fn send_plain(
     session: &Session,
     peer: &BareJid,
+    kind: MessageType,
     body: Option<&str>,
     extra: Vec<tokio_xmpp::minidom::Element>,
 ) -> &'static str {
     let id = new_id();
-    let mut message =
-        Message::chat(Some(Jid::from(peer.clone()))).with_payload(OriginId { id: id.clone() });
+    let mut message = Message::new_with_type(kind, Some(Jid::from(peer.clone())))
+        .with_payload(OriginId { id: id.clone() });
     message.id = Some(Id(id));
     if let Some(body) = body {
         message.bodies.insert(Lang::default(), body.to_owned());
@@ -758,6 +934,57 @@ impl ConversationObject {
     fn valid_peer(&self) -> zbus::fdo::Result<BareJid> {
         self.peer_jid()
             .ok_or_else(|| zbus::fdo::Error::Failed("this conversation has no valid peer".into()))
+    }
+
+    fn is_room(&self) -> bool {
+        self.row.kind == "room"
+    }
+
+    fn message_type(&self) -> MessageType {
+        if self.is_room() {
+            MessageType::Groupchat
+        } else {
+            MessageType::Chat
+        }
+    }
+
+    /// Who we are in this conversation: our JID, or our place in the room.
+    async fn me(&self) -> String {
+        if self.is_room() {
+            let nick = self
+                .session
+                .rooms
+                .nick(&self.row.peer)
+                .await
+                .unwrap_or_default();
+            format!("{}/{nick}", self.row.peer)
+        } else {
+            self.session.jid.to_string()
+        }
+    }
+
+    /// The id others know `m` by for reactions and replies: in rooms the
+    /// room's archive id, elsewhere the message id.
+    fn reference(&self, m: &MessageRow) -> String {
+        match (&m.server_id, self.is_room()) {
+            (Some(id), true) => id.clone(),
+            _ => m.origin_id.clone(),
+        }
+    }
+
+    /// Refuses to send to a room we are not in.
+    async fn check_joined(&self) -> zbus::fdo::Result<()> {
+        if self.is_room()
+            && self
+                .session
+                .rooms
+                .get(&self.row.peer)
+                .await
+                .is_none_or(|l| l.state != "joined")
+        {
+            return Err(zbus::fdo::Error::Failed("you are not in this room".into()));
+        }
+        Ok(())
     }
 
     /// One of this conversation's messages, by the id the bus uses.
@@ -918,6 +1145,7 @@ impl ConversationObject {
             return Err(zbus::fdo::Error::InvalidArgs("the message is empty".into()));
         }
         let peer = self.valid_peer()?;
+        self.check_joined().await?;
         let reply_to = match options.get("reply-to") {
             Some(v) => {
                 let id = <&str>::try_from(v)
@@ -937,7 +1165,7 @@ impl ConversationObject {
             origin_id: origin_id.clone(),
             server_id: None,
             outgoing: true,
-            sender: self.session.jid.to_string(),
+            sender: self.me().await,
             body: body.to_owned(),
             timestamp: now_ms(),
             state: state::PENDING,
@@ -947,11 +1175,11 @@ impl ConversationObject {
         let mut extra = vec![];
         let mut wire_body = body.to_owned();
         if let Some(target) = &reply_to {
-            new.reply_to = target.origin_id.clone();
+            new.reply_to = self.reference(target);
             new.reply_to_sender = target.sender.clone();
             new.reply_preview = rich::preview(&target.body);
             let (elements, quoted) =
-                rich::reply_elements(&target.origin_id, &target.sender, &new.reply_preview, body);
+                rich::reply_elements(&new.reply_to, &target.sender, &new.reply_preview, body);
             extra = elements;
             wire_body = quoted;
         }
@@ -970,11 +1198,16 @@ impl ConversationObject {
 
         let session = self.session.clone();
         let conversation = self.row.id;
-        let wanted = self.row.encryption_wanted;
+        // Group chats are not encrypted yet.
+        let wanted = self.row.encryption_wanted && !self.is_room();
+        let kind = self.message_type();
+        let tracked = !self.is_room();
         let message_id = row.id;
         tokio::spawn(async move {
-            let (new_state, used) =
-                deliver(&session, &peer, wanted, &origin_id, &wire_body, extra, true).await;
+            let (new_state, used) = deliver(
+                &session, &peer, kind, wanted, &origin_id, &wire_body, extra, tracked,
+            )
+            .await;
             if used != encryption
                 && let Ok(true) = session
                     .store
@@ -1010,8 +1243,10 @@ impl ConversationObject {
             ));
         }
         let peer = self.valid_peer()?;
+        self.check_joined().await?;
         let target = self.target(id).await?;
-        if !target.outgoing || target.retracted {
+        let me = self.me().await;
+        if !target.outgoing || target.retracted || target.sender != me {
             return Err(zbus::fdo::Error::InvalidArgs(
                 "only your own messages can be corrected".into(),
             ));
@@ -1031,7 +1266,8 @@ impl ConversationObject {
         let (state, _) = deliver(
             &self.session,
             &peer,
-            self.row.encryption_wanted,
+            self.message_type(),
+            self.row.encryption_wanted && !self.is_room(),
             &new_id(),
             &wire_body,
             extra,
@@ -1047,7 +1283,7 @@ impl ConversationObject {
             &self.session,
             self.row.id,
             Some(target),
-            true,
+            &me,
             body.to_owned(),
         )
         .await;
@@ -1063,6 +1299,7 @@ impl ConversationObject {
     ) -> zbus::fdo::Result<()> {
         access::check(&header)?;
         let peer = self.valid_peer()?;
+        self.check_joined().await?;
         let target = self.target(id).await?;
         let mut unique: Vec<String> = Vec::new();
         for e in emojis {
@@ -1072,22 +1309,16 @@ impl ConversationObject {
             }
         }
         let extra = vec![
-            rich::reactions_element(&target.origin_id, &unique),
+            rich::reactions_element(&self.reference(&target), &unique),
             rich::store_hint(),
         ];
-        if send_plain(&self.session, &peer, None, extra).await == state::FAILED {
+        if send_plain(&self.session, &peer, self.message_type(), None, extra).await == state::FAILED
+        {
             return Err(zbus::fdo::Error::Failed(
                 "the reaction could not be sent".into(),
             ));
         }
-        rich::react(
-            &self.session,
-            self.row.id,
-            target,
-            self.session.jid.to_string(),
-            unique,
-        )
-        .await;
+        rich::react(&self.session, self.row.id, target, self.me().await, unique).await;
         Ok(())
     }
 
@@ -1100,21 +1331,31 @@ impl ConversationObject {
     ) -> zbus::fdo::Result<()> {
         access::check(&header)?;
         let peer = self.valid_peer()?;
+        self.check_joined().await?;
         let target = self.target(id).await?;
-        if !target.outgoing {
+        let me = self.me().await;
+        if !target.outgoing || target.sender != me {
             return Err(zbus::fdo::Error::InvalidArgs(
                 "only your own messages can be retracted".into(),
             ));
         }
         let extra = rich::retract_elements(&target.origin_id);
-        if send_plain(&self.session, &peer, Some(rich::RETRACT_FALLBACK), extra).await
+        let kind = self.message_type();
+        if send_plain(
+            &self.session,
+            &peer,
+            kind,
+            Some(rich::RETRACT_FALLBACK),
+            extra,
+        )
+        .await
             == state::FAILED
         {
             return Err(zbus::fdo::Error::Failed(
                 "the retraction could not be sent".into(),
             ));
         }
-        rich::retract(&self.session, self.row.id, target, true).await;
+        rich::retract(&self.session, self.row.id, target, &me).await;
         Ok(())
     }
 

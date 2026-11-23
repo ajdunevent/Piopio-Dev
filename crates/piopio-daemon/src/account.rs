@@ -145,6 +145,35 @@ impl AccountObject {
         Ok(path)
     }
 
+    /// Joins a group chat and bookmarks it. Returns the conversation's path
+    /// right away; the Room interface on it follows the joining. An empty
+    /// nick uses the account's name. Options: "password" (s).
+    async fn join_room(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        jid: &str,
+        nick: &str,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        access::check(&header)?;
+        let room: BareJid = jid
+            .parse()
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(format!("not a valid JID: {e}")))?;
+        if room.node().is_none() {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "a room's address looks like room@conference.example.org".into(),
+            ));
+        }
+        let password = options
+            .get("password")
+            .and_then(|v| <&str>::try_from(v).ok())
+            .unwrap_or("")
+            .to_owned();
+        crate::rooms::join(&self.session, &room, Some(nick.to_owned()), password)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
     /// Changes the account's password on the server (XEP-0077), then uses it.
     async fn change_password(
         &self,
