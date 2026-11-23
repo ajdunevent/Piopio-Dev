@@ -197,6 +197,55 @@ impl TestDaemon {
     }
 }
 
+impl TestDaemon {
+    pub async fn omemo(
+        &self,
+        path: zbus::zvariant::OwnedObjectPath,
+    ) -> piopio_dbus::OmemoProxy<'static> {
+        piopio_dbus::OmemoProxy::builder(&self.connection)
+            .path(path)
+            .unwrap()
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    /// Waits until the account's OMEMO device is published; returns its id.
+    pub async fn wait_published(&self, path: &zbus::zvariant::OwnedObjectPath) -> u32 {
+        let omemo = self.omemo(path.clone()).await;
+        wait_for(20, "the OMEMO device to be published", || async {
+            omemo.published().await.unwrap().then_some(())
+        })
+        .await;
+        omemo.device_id().await.unwrap()
+    }
+
+    /// Waits until this account knows `device` of `jid`; returns its entry.
+    pub async fn wait_device(
+        &self,
+        path: &zbus::zvariant::OwnedObjectPath,
+        jid: &str,
+        device: u32,
+    ) -> piopio_dbus::Dict {
+        let omemo = self.omemo(path.clone()).await;
+        wait_for(20, "an OMEMO device to become known", || async {
+            omemo
+                .get_devices(jid)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|d| d.get("device-id").and_then(|v| u32::try_from(v).ok()) == Some(device))
+        })
+        .await
+    }
+}
+
+/// The message with `id` in a list from GetMessages.
+pub fn message<'a>(messages: &'a [piopio_dbus::Dict], id: &str) -> Option<&'a piopio_dbus::Dict> {
+    messages.iter().find(|m| text(m, "id") == id)
+}
+
 pub async fn wait_until_connected(account: &AccountProxy<'_>) {
     let state = wait_for(30, "the account to connect or fail", || async {
         let state = account.state().await.unwrap();

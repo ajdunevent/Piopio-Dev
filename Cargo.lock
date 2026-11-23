@@ -1885,14 +1885,17 @@ name = "piopio-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "futures-util",
  "getrandom 0.3.4",
  "oo7",
  "piopio-dbus",
+ "piopio-omemo",
  "rusqlite",
  "sasl",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
  "tempfile",
  "tokio",
  "tokio-xmpp",

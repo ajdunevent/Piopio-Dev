@@ -85,7 +85,11 @@ async fn contacts_chat_receipts_and_markers() {
         .unwrap();
     assert_eq!(text(&bob_entry, "name"), "Bob");
 
-    // Alice writes; Bob receives; Alice sees the receipt.
+    alice.wait_published(&alice_path).await;
+    bob.wait_published(&bob_path).await;
+
+    // Alice writes; Bob receives; Alice sees the receipt. Both use OMEMO,
+    // so the message is encrypted without anyone asking for it.
     let alice_account = alice.account(alice_path.clone()).await;
     let chat_path = alice_account.start_chat("bob@localhost").await.unwrap();
     let alice_chat = alice.conversation(chat_path).await;
@@ -108,6 +112,7 @@ async fn contacts_chat_receipts_and_markers() {
     })
     .await;
     assert_eq!(text(&received, "body"), "Hello Bob");
+    assert_eq!(text(&received, "encryption"), "omemo");
     assert!(!bool::try_from(received.get("outgoing").unwrap()).unwrap());
     assert_eq!(bob_chat.unread().await.unwrap(), 1);
 
@@ -146,6 +151,10 @@ async fn contacts_chat_receipts_and_markers() {
     let messages = alice_chat.get_messages("", 10).await.unwrap();
     assert_eq!(text(&messages[0], "body"), "Hello Bob");
     assert_eq!(text(&messages[1], "body"), "Hi Alice");
+    for m in &messages {
+        assert_eq!(text(m, "encryption"), "omemo", "{m:?}");
+    }
+    assert_eq!(alice_chat.encryption().await.unwrap(), "omemo");
     assert_eq!(alice_chat.unread().await.unwrap(), 1);
 }
 
@@ -163,6 +172,13 @@ async fn carbons_archive_and_restart() {
     let (phone_path, phone_account) = phone.add_local("carol").await;
     let (laptop_path, _) = laptop.add_local("carol").await;
     let (dave_path, _) = dave.add_local("dave").await;
+    phone.wait_published(&phone_path).await;
+    let laptop_device = laptop.wait_published(&laptop_path).await;
+    dave.wait_published(&dave_path).await;
+    // The phone must know the laptop to encrypt for it too.
+    phone
+        .wait_device(&phone_path, "carol@localhost", laptop_device)
+        .await;
 
     // Carol writes from her phone; her laptop sees it as a carbon.
     let chat = phone
@@ -217,11 +233,11 @@ async fn carbons_archive_and_restart() {
         (m.len() >= 2).then_some(m)
     })
     .await;
-    let bodies: Vec<String> = history.iter().map(|m| text(m, "body")).collect();
-    assert!(
-        bodies.ends_with(&["Sent from my phone".into(), "Got it".into()]),
-        "{bodies:?}"
-    );
+    // They were encrypted before this device existed, so it cannot read them.
+    for m in &history {
+        assert_eq!(text(m, "encryption"), "omemo-failed", "{m:?}");
+        assert_eq!(text(m, "body"), "");
+    }
     assert_eq!(
         tablet_chat.unread().await.unwrap(),
         0,
@@ -248,7 +264,11 @@ async fn carbons_archive_and_restart() {
         // Archive timestamps have whole-second precision, so this one may
         // sort just before "Got it" when both fall in the same second.
         let m = chat.get_messages("", 10).await.unwrap();
-        (m.len() == 3 && m.iter().any(|m| text(m, "body") == "While you were away")).then_some(())
+        (m.len() == 3
+            && m.iter().any(|m| {
+                text(m, "body") == "While you were away" && text(m, "encryption") == "omemo"
+            }))
+        .then_some(())
     })
     .await;
     let _ = phone_path;

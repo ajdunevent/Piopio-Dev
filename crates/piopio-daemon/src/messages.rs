@@ -13,9 +13,12 @@ use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::parsers::carbons;
 use tokio_xmpp::parsers::delay::Delay;
 use tokio_xmpp::parsers::displayed_markers::{Displayed, Markable};
+use tokio_xmpp::parsers::eme::ExplicitMessageEncryption;
 use tokio_xmpp::parsers::iq::Iq;
+use tokio_xmpp::parsers::legacy_omemo::Encrypted;
 use tokio_xmpp::parsers::mam;
 use tokio_xmpp::parsers::message::{Id, Lang, Message, MessageType};
+use tokio_xmpp::parsers::ns;
 use tokio_xmpp::parsers::receipts;
 use tokio_xmpp::parsers::rsm::SetQuery;
 use tokio_xmpp::parsers::stanza_id::{OriginId, StanzaId};
@@ -124,6 +127,17 @@ impl Conversations {
         }
     }
 
+    /// Re-announces a conversation's Encryption (its peer's devices changed).
+    pub async fn encryption_changed(&self, shared: &Shared, jid: &BareJid) {
+        let Some((_, path)) = self.by_peer.lock().await.get(jid.as_str()).cloned() else {
+            return;
+        };
+        if let Some(iface) = self.iface(shared, &path).await {
+            let object = iface.get().await;
+            let _ = object.encryption_changed(iface.signal_emitter()).await;
+        }
+    }
+
     async fn iface(
         &self,
         shared: &Shared,
@@ -155,6 +169,18 @@ pub async fn enable_carbons(shared: &Shared) {
 
 /// Handles every incoming `<message/>`.
 pub async fn incoming(session: &Session, mut message: Message) {
+    // PEP notifications (OMEMO device lists).
+    if let Some(event) = message
+        .payloads
+        .iter()
+        .find(|p| p.is("event", ns::PUBSUB_EVENT))
+        .cloned()
+    {
+        if crate::omemo::event(session, message.from.as_ref(), &event).await {
+            return;
+        }
+    }
+
     // Archive results for our own queries.
     if let Ok(Some(result)) = message.extract_payload::<mam::Result_>() {
         if !session.is_own(message.from.as_ref()) {
@@ -257,9 +283,11 @@ async fn handle(
         }
     }
 
-    let Some((_, body)) = message.get_best_body_cloned(vec![]) else {
+    let encrypted = message.extract_payload::<Encrypted>().ok().flatten();
+    let plain_body = message.get_best_body_cloned(vec![]).map(|(_, b)| b);
+    if encrypted.is_none() && plain_body.is_none() {
         return;
-    };
+    }
     let wants_receipt = matches!(message.extract_payload::<receipts::Request>(), Ok(Some(_)));
     let origin = message
         .extract_payload::<OriginId>()
@@ -281,16 +309,47 @@ async fn handle(
         .map(|d| d.stamp.0.timestamp_millis())
         .unwrap_or_else(now_ms);
     let sender = if outgoing {
-        session.jid.to_string()
+        session.jid.clone()
     } else {
-        peer.to_string()
+        peer.clone()
+    };
+
+    let (body, encryption) = match encrypted {
+        None => (plain_body.unwrap_or_default(), "none"),
+        Some(encrypted) => {
+            // Already stored (our own message, or one seen live and again in
+            // the archive): decrypting again would only fail.
+            if encrypted.payload.is_some()
+                && let Ok((conversation, _)) = session.conversations.get(session, &peer).await
+                && session
+                    .store
+                    .has_message(conversation, origin_id.clone(), outgoing)
+                    .await
+                    .unwrap_or(false)
+            {
+                return;
+            }
+            match crate::omemo::decrypt(session, &sender, &encrypted).await {
+                crate::omemo::Decrypted::Text { body, trusted } => {
+                    (body, if trusted { "omemo" } else { "omemo-untrusted" })
+                }
+                crate::omemo::Decrypted::KeyTransport => return,
+                crate::omemo::Decrypted::Failed(why) => {
+                    if encrypted.payload.is_none() {
+                        return;
+                    }
+                    tracing::info!(%peer, "an OMEMO message could not be decrypted: {why}");
+                    (String::new(), "omemo-failed")
+                }
+            }
+        }
     };
 
     let new = NewMessage {
         origin_id,
         server_id: server_id.clone(),
         outgoing,
-        sender,
+        sender: sender.to_string(),
         body,
         timestamp,
         state: if outgoing {
@@ -298,6 +357,7 @@ async fn handle(
         } else {
             state::RECEIVED
         },
+        encryption,
     };
     let counts_as_unread = !outgoing && source != (Source::Archive { first_sync: true });
     let stored = store_message(session, &peer, new, counts_as_unread).await;
@@ -501,7 +561,7 @@ pub fn message_dict(m: &MessageRow) -> HashMap<String, OwnedValue> {
     map.insert("body".into(), str_value(m.body.clone()));
     map.insert("timestamp".into(), OwnedValue::from(m.timestamp));
     map.insert("state".into(), str_value(m.state.clone()));
-    map.insert("encryption".into(), str_value("none"));
+    map.insert("encryption".into(), str_value(m.encryption.clone()));
     map
 }
 
@@ -594,10 +654,17 @@ impl ConversationObject {
         Ok(())
     }
 
-    /// The encryption in effect: none, omemo or omemo2. OMEMO arrives in milestone 2.
+    /// The encryption new messages get: "omemo" when EncryptionWanted is set
+    /// and the peer has announced OMEMO devices, otherwise "none".
     #[zbus(property)]
-    fn encryption(&self) -> String {
-        "none".into()
+    async fn encryption(&self) -> String {
+        crate::omemo::conversation_encryption(
+            &self.session,
+            &self.row.peer,
+            self.row.encryption_wanted,
+        )
+        .await
+        .into()
     }
 
     #[zbus(property)]
@@ -606,9 +673,14 @@ impl ConversationObject {
     }
 
     #[zbus(property)]
-    async fn set_encryption_wanted(&mut self, wanted: bool) {
+    async fn set_encryption_wanted(
+        &mut self,
+        wanted: bool,
+        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
+    ) {
         self.row.encryption_wanted = wanted;
         self.save().await;
+        let _ = self.encryption_changed(&emitter).await;
     }
 
     #[zbus(property)]
@@ -658,6 +730,12 @@ impl ConversationObject {
             zbus::fdo::Error::Failed("this conversation has no valid peer".into())
         })?;
         let origin_id = new_id();
+        let encryption = crate::omemo::conversation_encryption(
+            &self.session,
+            &self.row.peer,
+            self.row.encryption_wanted,
+        )
+        .await;
         let row = self
             .session
             .store
@@ -671,6 +749,7 @@ impl ConversationObject {
                     body: body.to_owned(),
                     timestamp: now_ms(),
                     state: state::PENDING,
+                    encryption,
                 },
             )
             .await
@@ -682,25 +761,66 @@ impl ConversationObject {
         self.last_activity_changed(&emitter).await?;
         self.save().await;
 
-        let mut message = Message::chat(Some(Jid::from(peer.clone())))
-            .with_body(Lang::default(), body.to_owned())
-            .with_payload(OriginId {
-                id: origin_id.clone(),
-            })
-            .with_payload(receipts::Request)
-            .with_payload(Markable);
-        message.id = Some(Id(origin_id.clone()));
-
         let session = self.session.clone();
         let conversation = self.row.id;
+        let wanted = self.row.encryption_wanted;
         let emitter = emitter.into_owned();
         let message_id = row.id.to_string();
+        let body = body.to_owned();
         tokio::spawn(async move {
-            let new_state = match session.send(message).await {
-                None => state::FAILED,
-                Some(mut token) => match token.wait_for(StanzaStage::Sent).await {
-                    Some(StanzaState::Sent { .. } | StanzaState::Acked { .. }) => state::SENT,
-                    _ => state::FAILED,
+            let mut message = Message::chat(Some(Jid::from(peer.clone())))
+                .with_payload(OriginId {
+                    id: origin_id.clone(),
+                })
+                .with_payload(receipts::Request)
+                .with_payload(Markable);
+            message.id = Some(Id(origin_id.clone()));
+            let mut used = "none";
+            let new_state = match crate::omemo::encrypt(&session, &peer, wanted, &body).await {
+                crate::omemo::Outgoing::Plain => {
+                    message.bodies.insert(Lang::default(), body);
+                    None
+                }
+                crate::omemo::Outgoing::Encrypted(encrypted) => {
+                    used = "omemo";
+                    message
+                        .bodies
+                        .insert(Lang::default(), crate::omemo::FALLBACK_BODY.to_owned());
+                    message.payloads.push(encrypted);
+                    message.payloads.push(
+                        ExplicitMessageEncryption {
+                            namespace: ns::LEGACY_OMEMO.to_owned(),
+                            name: Some("OMEMO".to_owned()),
+                        }
+                        .into(),
+                    );
+                    message.payloads.push(
+                        tokio_xmpp::minidom::Element::builder("store", "urn:xmpp:hints").build(),
+                    );
+                    None
+                }
+                crate::omemo::Outgoing::Failed(why) => {
+                    tracing::warn!(%peer, "not sending: {why}");
+                    Some(state::FAILED)
+                }
+            };
+            if used != encryption
+                && let Ok(true) = session
+                    .store
+                    .set_message_encryption(conversation, origin_id.clone(), used)
+                    .await
+            {
+                let changes = HashMap::from([("encryption", Value::from(used))]);
+                let _ = Self::message_changed(&emitter, &message_id, changes).await;
+            }
+            let new_state = match new_state {
+                Some(failed) => failed,
+                None => match session.send(message).await {
+                    None => state::FAILED,
+                    Some(mut token) => match token.wait_for(StanzaStage::Sent).await {
+                        Some(StanzaState::Sent { .. } | StanzaState::Acked { .. }) => state::SENT,
+                        _ => state::FAILED,
+                    },
                 },
             };
             if let Ok(Some(row)) = session

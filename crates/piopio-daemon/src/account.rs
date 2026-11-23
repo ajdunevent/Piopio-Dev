@@ -139,6 +139,9 @@ impl AccountObject {
             .get(&self.session, &peer)
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        // Learn whether the peer uses OMEMO, so Encryption is right before
+        // the first message.
+        crate::omemo::refresh(&self.session, peer);
         Ok(path)
     }
 
@@ -242,6 +245,14 @@ impl Account {
                 },
             )
             .await?;
+        objects
+            .at(
+                &path,
+                crate::omemo::OmemoObject {
+                    session: session.clone(),
+                },
+            )
+            .await?;
         let iface = objects.interface::<_, AccountObject>(&path).await?;
         session.conversations.load(&session).await?;
 
@@ -272,6 +283,9 @@ impl Account {
         let objects = self.session.bus.object_server();
         self.session.conversations.unexport_all(&self.session).await;
         let _ = objects.remove::<RosterObject, _>(&self.path).await;
+        let _ = objects
+            .remove::<crate::omemo::OmemoObject, _>(&self.path)
+            .await;
         let _ = objects.remove::<AccountObject, _>(&self.path).await;
     }
 }

@@ -59,6 +59,30 @@ const SCHEMA: &[&str] = &[
     CREATE INDEX messages_by_time ON messages (conversation_id, timestamp, id);
     CREATE INDEX messages_by_server_id ON messages (server_id);
     "#,
+    // Version 2: OMEMO
+    r#"
+    ALTER TABLE messages ADD COLUMN encryption TEXT NOT NULL DEFAULT 'none';
+    CREATE TABLE omemo_own (
+        account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+        state      TEXT NOT NULL
+    );
+    CREATE TABLE omemo_devices (
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        jid        TEXT NOT NULL,
+        device_id  INTEGER NOT NULL,
+        active     INTEGER NOT NULL DEFAULT 1,
+        trust      TEXT NOT NULL DEFAULT 'undecided',
+        identity   TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (account_id, jid, device_id)
+    );
+    CREATE TABLE omemo_sessions (
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        jid        TEXT NOT NULL,
+        device_id  INTEGER NOT NULL,
+        state      TEXT NOT NULL,
+        PRIMARY KEY (account_id, jid, device_id)
+    );
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -117,6 +141,8 @@ pub struct MessageRow {
     /// Milliseconds since the Unix epoch.
     pub timestamp: i64,
     pub state: String,
+    /// none, omemo, or omemo-failed (could not be decrypted).
+    pub encryption: String,
 }
 
 /// A message about to be stored. Duplicates (same conversation, origin id and
@@ -131,6 +157,7 @@ pub struct NewMessage {
     pub body: String,
     pub timestamp: i64,
     pub state: &'static str,
+    pub encryption: &'static str,
 }
 
 #[derive(Clone)]
@@ -381,8 +408,8 @@ impl Store {
         self.with(move |db| {
             let inserted = db.execute(
                 "INSERT OR IGNORE INTO messages
-                 (conversation_id, origin_id, server_id, outgoing, sender, body, timestamp, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (conversation_id, origin_id, server_id, outgoing, sender, body, timestamp, state, encryption)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     conversation,
                     m.origin_id,
@@ -391,7 +418,8 @@ impl Store {
                     m.sender,
                     m.body,
                     m.timestamp,
-                    m.state
+                    m.state,
+                    m.encryption
                 ],
             )?;
             if inserted == 0 {
@@ -414,6 +442,7 @@ impl Store {
                 body: m.body,
                 timestamp: m.timestamp,
                 state: m.state.to_owned(),
+                encryption: m.encryption.to_owned(),
             }))
         })
         .await
@@ -477,6 +506,184 @@ impl Store {
     }
 }
 
+/// What we know about one OMEMO device of a contact (or of ourselves).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceRow {
+    pub jid: String,
+    pub device_id: u32,
+    pub active: bool,
+    /// undecided, blind, trusted or untrusted.
+    pub trust: String,
+    /// The identity key in hex, once known.
+    pub identity: String,
+}
+
+impl Store {
+    /// Whether a message is already stored (to skip decrypting it again).
+    pub async fn has_message(
+        &self,
+        conversation: i64,
+        origin_id: String,
+        outgoing: bool,
+    ) -> anyhow::Result<bool> {
+        self.with(move |db| {
+            db.query_row(
+                "SELECT 1 FROM messages WHERE conversation_id = ?1 AND origin_id = ?2 AND outgoing = ?3",
+                params![conversation, origin_id, outgoing],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
+        })
+        .await
+    }
+
+    /// Records how a pending outgoing message was finally sent.
+    pub async fn set_message_encryption(
+        &self,
+        conversation: i64,
+        origin_id: String,
+        encryption: &'static str,
+    ) -> anyhow::Result<bool> {
+        self.with(move |db| {
+            db.execute(
+                "UPDATE messages SET encryption = ?3
+                 WHERE conversation_id = ?1 AND origin_id = ?2 AND outgoing = 1",
+                params![conversation, origin_id, encryption],
+            )
+            .map(|n| n > 0)
+        })
+        .await
+    }
+
+    pub async fn omemo_own(&self, account: i64) -> anyhow::Result<Option<String>> {
+        self.with(move |db| {
+            db.query_row(
+                "SELECT state FROM omemo_own WHERE account_id = ?1",
+                [account],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn set_omemo_own(&self, account: i64, state: String) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO omemo_own (account_id, state) VALUES (?1, ?2)
+                 ON CONFLICT (account_id) DO UPDATE SET state = excluded.state",
+                params![account, state],
+            )
+            .map(drop)
+        })
+        .await
+    }
+
+    pub async fn devices(&self, account: i64, jid: String) -> anyhow::Result<Vec<DeviceRow>> {
+        self.with(move |db| {
+            let mut q = db.prepare(
+                "SELECT jid, device_id, active, trust, identity FROM omemo_devices
+                 WHERE account_id = ?1 AND jid = ?2 ORDER BY device_id",
+            )?;
+            q.query_map(params![account, jid], |r| {
+                Ok(DeviceRow {
+                    jid: r.get(0)?,
+                    device_id: r.get(1)?,
+                    active: r.get(2)?,
+                    trust: r.get(3)?,
+                    identity: r.get(4)?,
+                })
+            })?
+            .collect()
+        })
+        .await
+    }
+
+    /// Records a published device list: listed devices become active (new
+    /// ones are added), devices no longer listed become inactive.
+    pub async fn set_device_list(
+        &self,
+        account: i64,
+        jid: String,
+        ids: Vec<u32>,
+    ) -> anyhow::Result<()> {
+        self.with(move |db| {
+            let tx = db.transaction()?;
+            tx.execute(
+                "UPDATE omemo_devices SET active = 0 WHERE account_id = ?1 AND jid = ?2",
+                params![account, jid],
+            )?;
+            for id in ids {
+                tx.execute(
+                    "INSERT INTO omemo_devices (account_id, jid, device_id) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (account_id, jid, device_id) DO UPDATE SET active = 1",
+                    params![account, jid, id],
+                )?;
+            }
+            tx.commit()
+        })
+        .await
+    }
+
+    /// Updates one device's identity key and trust (inserting it if needed).
+    pub async fn set_device(
+        &self,
+        account: i64,
+        jid: String,
+        device_id: u32,
+        identity: String,
+        trust: String,
+    ) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO omemo_devices (account_id, jid, device_id, active, trust, identity)
+                 VALUES (?1, ?2, ?3, 0, ?5, ?4)
+                 ON CONFLICT (account_id, jid, device_id) DO UPDATE SET
+                   identity = excluded.identity, trust = excluded.trust",
+                params![account, jid, device_id, identity, trust],
+            )
+            .map(drop)
+        })
+        .await
+    }
+
+    pub async fn omemo_session(
+        &self,
+        account: i64,
+        jid: String,
+        device_id: u32,
+    ) -> anyhow::Result<Option<String>> {
+        self.with(move |db| {
+            db.query_row(
+                "SELECT state FROM omemo_sessions WHERE account_id = ?1 AND jid = ?2 AND device_id = ?3",
+                params![account, jid, device_id],
+                |r| r.get(0),
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn set_omemo_session(
+        &self,
+        account: i64,
+        jid: String,
+        device_id: u32,
+        state: String,
+    ) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "INSERT INTO omemo_sessions (account_id, jid, device_id, state) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (account_id, jid, device_id) DO UPDATE SET state = excluded.state",
+                params![account, jid, device_id, state],
+            )
+            .map(drop)
+        })
+        .await
+    }
+}
+
 fn rank(state: &str) -> u8 {
     match state {
         state::FAILED => 0,
@@ -490,7 +697,8 @@ fn rank(state: &str) -> u8 {
 
 const CONVERSATION_COLUMNS: &str =
     "id, account_id, peer, kind, pinned, muted, unread, last_activity, encryption_wanted";
-const MESSAGE_COLUMNS: &str = "id, origin_id, server_id, outgoing, sender, body, timestamp, state";
+const MESSAGE_COLUMNS: &str =
+    "id, origin_id, server_id, outgoing, sender, body, timestamp, state, encryption";
 
 fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRow> {
     Ok(ConversationRow {
@@ -516,6 +724,7 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
         body: r.get(5)?,
         timestamp: r.get(6)?,
         state: r.get(7)?,
+        encryption: r.get(8)?,
     })
 }
 
@@ -629,6 +838,7 @@ mod tests {
             body: format!("body {id}"),
             timestamp: ts,
             state: state::PENDING,
+            encryption: "none",
         }
     }
 

@@ -13,6 +13,7 @@ mod disco;
 mod login;
 mod messages;
 mod notify;
+mod omemo;
 mod roster;
 mod session;
 mod store;

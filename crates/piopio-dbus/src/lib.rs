@@ -29,6 +29,9 @@ pub const ROSTER_API_VERSION: u32 = 1;
 /// Version of the Conversation interface implemented by this build.
 pub const CONVERSATION_API_VERSION: u32 = 1;
 
+/// Version of the Omemo interface implemented by this build.
+pub const OMEMO_API_VERSION: u32 = 1;
+
 /// Accounts live at `ACCOUNT_PATH_PREFIX/<id>`.
 pub const ACCOUNT_PATH_PREFIX: &str = "/net/dunevent/Piopio/account";
 
@@ -166,4 +169,39 @@ pub trait Conversation {
 
     #[zbus(signal)]
     fn message_changed(&self, id: &str, changes: Dict) -> zbus::Result<()>;
+}
+
+/// Client side of `net.dunevent.Piopio.Omemo`, on each account object.
+#[zbus::proxy(
+    interface = "net.dunevent.Piopio.Omemo",
+    default_service = "net.dunevent.Piopio.Daemon"
+)]
+pub trait Omemo {
+    /// This device's OMEMO device id.
+    #[zbus(property)]
+    fn device_id(&self) -> zbus::Result<u32>;
+
+    /// This device's fingerprint, as contacts see it.
+    #[zbus(property)]
+    fn fingerprint(&self) -> zbus::Result<String>;
+
+    /// True once this device and its keys are published for this login.
+    #[zbus(property)]
+    fn published(&self) -> zbus::Result<bool>;
+
+    /// The devices of a JID (the account's own JID for its other devices).
+    /// Keys: device-id (u), active (b), trust (s: blind, verified,
+    /// untrusted or undecided) and fingerprint (s, empty until known).
+    fn get_devices(&self, jid: &str) -> zbus::Result<Vec<Dict>>;
+
+    /// Sets a device's trust.
+    fn set_trust(&self, jid: &str, device_id: u32, trust: &str) -> zbus::Result<()>;
+
+    /// The devices of a JID, or their trust, changed.
+    #[zbus(signal)]
+    fn devices_changed(&self, jid: &str) -> zbus::Result<()>;
+
+    /// Version of this interface.
+    #[zbus(property)]
+    fn api_version(&self) -> zbus::Result<u32>;
 }

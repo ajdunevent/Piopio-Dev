@@ -77,6 +77,7 @@ pub struct Shared {
     /// The presence we announce: (show, status). Show is "available", "away",
     /// "chat", "dnd" or "xa".
     pub presence: Mutex<(String, String)>,
+    pub omemo: crate::omemo::OmemoState,
 }
 
 /// Handle used by everything outside the session task.
@@ -144,6 +145,7 @@ pub fn new_shared(
         roster: roster::RosterState::default(),
         conversations: messages::Conversations::default(),
         presence: Mutex::new(("available".into(), String::new())),
+        omemo: crate::omemo::OmemoState::default(),
     })
 }
 
@@ -322,6 +324,7 @@ async fn came_online(shared: Session, features: StreamFeatures) {
     messages::enable_carbons(&shared).await;
     send_presence(&shared).await;
     let _ = features;
+    crate::omemo::online(&shared).await;
     messages::catch_up(&shared).await;
 }
 
@@ -340,6 +343,7 @@ pub async fn send_presence(shared: &Shared) {
     if !status.is_empty() {
         presence.set_status("", status);
     }
+    presence.add_payload(crate::disco::caps());
     shared.send(presence).await;
 }
 
