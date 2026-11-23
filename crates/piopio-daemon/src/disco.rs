@@ -20,6 +20,12 @@ pub const FEATURES: &[&str] = &[
     "urn:xmpp:sid:0",
     "urn:xmpp:carbons:2",
     "eu.siacs.conversations.axolotl.devicelist+notify",
+    "urn:xmpp:message-correct:0",
+    "urn:xmpp:message-retract:0",
+    "urn:xmpp:message-retract:1",
+    "urn:xmpp:reactions:0",
+    "urn:xmpp:reply:0",
+    "urn:xmpp:fallback:0",
 ];
 
 /// The node our entity capabilities (XEP-0115) point at.

@@ -83,6 +83,20 @@ const SCHEMA: &[&str] = &[
         PRIMARY KEY (account_id, jid, device_id)
     );
     "#,
+    // Version 3: corrections, retractions, replies and reactions
+    r#"
+    ALTER TABLE messages ADD COLUMN edited INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN retracted INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE messages ADD COLUMN reply_to TEXT NOT NULL DEFAULT '';
+    ALTER TABLE messages ADD COLUMN reply_to_sender TEXT NOT NULL DEFAULT '';
+    ALTER TABLE messages ADD COLUMN reply_preview TEXT NOT NULL DEFAULT '';
+    CREATE TABLE reactions (
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        sender     TEXT NOT NULL,
+        emojis     TEXT NOT NULL,
+        PRIMARY KEY (message_id, sender)
+    );
+    "#,
 ];
 
 /// Where a message stands. Outgoing: pending → sent → received → displayed,
@@ -141,14 +155,25 @@ pub struct MessageRow {
     /// Milliseconds since the Unix epoch.
     pub timestamp: i64,
     pub state: String,
-    /// none, omemo, or omemo-failed (could not be decrypted).
+    /// none, omemo, omemo-untrusted or omemo-failed (could not be decrypted).
     pub encryption: String,
+    /// The body was corrected (XEP-0308).
+    pub edited: bool,
+    /// The sender retracted the message (XEP-0424); the body is gone.
+    pub retracted: bool,
+    /// The id of the message this one replies to (XEP-0461), or "".
+    pub reply_to: String,
+    pub reply_to_sender: String,
+    /// The start of the replied-to message, for showing the quote.
+    pub reply_preview: String,
+    /// Reactions (XEP-0444): each sender's emojis.
+    pub reactions: Vec<(String, Vec<String>)>,
 }
 
 /// A message about to be stored. Duplicates (same conversation, origin id and
 /// direction) are ignored, which makes Carbons, MAM and live delivery safe to
 /// overlap.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NewMessage {
     pub origin_id: String,
     pub server_id: Option<String>,
@@ -158,6 +183,9 @@ pub struct NewMessage {
     pub timestamp: i64,
     pub state: &'static str,
     pub encryption: &'static str,
+    pub reply_to: String,
+    pub reply_to_sender: String,
+    pub reply_preview: String,
 }
 
 #[derive(Clone)]
@@ -408,8 +436,9 @@ impl Store {
         self.with(move |db| {
             let inserted = db.execute(
                 "INSERT OR IGNORE INTO messages
-                 (conversation_id, origin_id, server_id, outgoing, sender, body, timestamp, state, encryption)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 (conversation_id, origin_id, server_id, outgoing, sender, body, timestamp, state,
+                  encryption, reply_to, reply_to_sender, reply_preview)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     conversation,
                     m.origin_id,
@@ -419,7 +448,10 @@ impl Store {
                     m.body,
                     m.timestamp,
                     m.state,
-                    m.encryption
+                    m.encryption,
+                    m.reply_to,
+                    m.reply_to_sender,
+                    m.reply_preview
                 ],
             )?;
             if inserted == 0 {
@@ -443,6 +475,12 @@ impl Store {
                 timestamp: m.timestamp,
                 state: m.state.to_owned(),
                 encryption: m.encryption.to_owned(),
+                edited: false,
+                retracted: false,
+                reply_to: m.reply_to,
+                reply_to_sender: m.reply_to_sender,
+                reply_preview: m.reply_preview,
+                reactions: vec![],
             }))
         })
         .await
@@ -466,6 +504,9 @@ impl Store {
                 .query_map(params![conversation, before, limit], message_from_row)?
                 .collect::<rusqlite::Result<_>>()?;
             rows.reverse();
+            for row in &mut rows {
+                row.reactions = reactions_of(db, row.id)?;
+            }
             Ok(rows)
         })
         .await
@@ -534,6 +575,109 @@ impl Store {
             )
             .optional()
             .map(|r| r.is_some())
+        })
+        .await
+    }
+
+    /// Finds a message of a conversation by the id others refer to it with:
+    /// its origin/message id or its archive id.
+    pub async fn find_message(
+        &self,
+        conversation: i64,
+        id: String,
+    ) -> anyhow::Result<Option<MessageRow>> {
+        self.with(move |db| {
+            let row = db
+                .query_row(
+                    &format!(
+                        "SELECT {MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ?1
+                         AND (origin_id = ?2 OR server_id = ?2) ORDER BY id LIMIT 1"
+                    ),
+                    params![conversation, id],
+                    message_from_row,
+                )
+                .optional()?;
+            let Some(mut row) = row else { return Ok(None) };
+            row.reactions = reactions_of(db, row.id)?;
+            Ok(Some(row))
+        })
+        .await
+    }
+
+    /// A message of a conversation by its row id.
+    pub async fn message_by_id(
+        &self,
+        conversation: i64,
+        id: i64,
+    ) -> anyhow::Result<Option<MessageRow>> {
+        self.with(move |db| {
+            let row = db
+                .query_row(
+                    &format!(
+                        "SELECT {MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ?1 AND id = ?2"
+                    ),
+                    params![conversation, id],
+                    message_from_row,
+                )
+                .optional()?;
+            let Some(mut row) = row else { return Ok(None) };
+            row.reactions = reactions_of(db, row.id)?;
+            Ok(Some(row))
+        })
+        .await
+    }
+
+    /// Replaces a message's body (a correction).
+    pub async fn correct_message(&self, id: i64, body: String) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "UPDATE messages SET body = ?2, edited = 1 WHERE id = ?1 AND retracted = 0",
+                params![id, body],
+            )
+            .map(drop)
+        })
+        .await
+    }
+
+    /// Forgets a retracted message's content (body, reactions, quote).
+    pub async fn retract_message(&self, id: i64) -> anyhow::Result<()> {
+        self.with(move |db| {
+            db.execute(
+                "UPDATE messages SET body = '', reply_preview = '', retracted = 1 WHERE id = ?1",
+                [id],
+            )?;
+            db.execute("DELETE FROM reactions WHERE message_id = ?1", [id])
+                .map(drop)
+        })
+        .await
+    }
+
+    /// Sets one sender's reactions to a message (empty removes them) and
+    /// returns everyone's reactions to it.
+    pub async fn set_reactions(
+        &self,
+        id: i64,
+        sender: String,
+        emojis: Vec<String>,
+    ) -> anyhow::Result<Vec<(String, Vec<String>)>> {
+        self.with(move |db| {
+            if emojis.is_empty() {
+                db.execute(
+                    "DELETE FROM reactions WHERE message_id = ?1 AND sender = ?2",
+                    params![id, sender],
+                )?;
+            } else {
+                db.execute(
+                    "INSERT INTO reactions (message_id, sender, emojis) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (message_id, sender) DO UPDATE SET emojis = excluded.emojis",
+                    params![
+                        id,
+                        sender,
+                        serde_json::to_string(&emojis).unwrap_or_default()
+                    ],
+                )?;
+            }
+            reactions_of(db, id)
         })
         .await
     }
@@ -697,8 +841,19 @@ fn rank(state: &str) -> u8 {
 
 const CONVERSATION_COLUMNS: &str =
     "id, account_id, peer, kind, pinned, muted, unread, last_activity, encryption_wanted";
-const MESSAGE_COLUMNS: &str =
-    "id, origin_id, server_id, outgoing, sender, body, timestamp, state, encryption";
+const MESSAGE_COLUMNS: &str = "id, origin_id, server_id, outgoing, sender, body, timestamp, state, \
+     encryption, edited, retracted, reply_to, reply_to_sender, reply_preview";
+
+fn reactions_of(db: &Connection, message: i64) -> rusqlite::Result<Vec<(String, Vec<String>)>> {
+    let mut q = db.prepare_cached(
+        "SELECT sender, emojis FROM reactions WHERE message_id = ?1 ORDER BY sender",
+    )?;
+    q.query_map([message], |r| {
+        let emojis: String = r.get(1)?;
+        Ok((r.get(0)?, serde_json::from_str(&emojis).unwrap_or_default()))
+    })?
+    .collect()
+}
 
 fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRow> {
     Ok(ConversationRow {
@@ -725,6 +880,12 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRow> {
         timestamp: r.get(6)?,
         state: r.get(7)?,
         encryption: r.get(8)?,
+        edited: r.get(9)?,
+        retracted: r.get(10)?,
+        reply_to: r.get(11)?,
+        reply_to_sender: r.get(12)?,
+        reply_preview: r.get(13)?,
+        reactions: vec![],
     })
 }
 
@@ -839,6 +1000,7 @@ mod tests {
             timestamp: ts,
             state: state::PENDING,
             encryption: "none",
+            ..Default::default()
         }
     }
 

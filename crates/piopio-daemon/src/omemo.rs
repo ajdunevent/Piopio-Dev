@@ -488,6 +488,7 @@ pub async fn event(shared: &Shared, from: Option<&Jid>, event: &Element) -> bool
 }
 
 async fn device_list_received(shared: &Shared, jid: &BareJid, ids: Vec<u32>) {
+    tracing::debug!(account = %shared.jid, %jid, ?ids, "device list");
     let before = shared
         .store
         .devices(shared.account_id, jid.to_string())
@@ -638,6 +639,7 @@ async fn save_session(shared: &Shared, jid: &BareJid, device: u32, s: &omemo::Se
 /// Decides how to send `body` to `peer`, and encrypts it if OMEMO is used.
 pub async fn encrypt(shared: &Shared, peer: &BareJid, wanted: bool, body: &str) -> Outgoing {
     if !wanted {
+        tracing::debug!(account = %shared.jid, %peer, "encryption not wanted");
         return Outgoing::Plain;
     }
     ensure_devices(shared, peer).await;
@@ -654,6 +656,7 @@ pub async fn encrypt(shared: &Shared, peer: &BareJid, wanted: bool, body: &str) 
         .filter(|d| d.active)
         .collect();
     if peer_devices.is_empty() {
+        tracing::debug!(account = %shared.jid, %peer, "no OMEMO devices: sending in the clear");
         return Outgoing::Plain;
     }
     let own_devices: Vec<_> = shared
@@ -694,6 +697,7 @@ pub async fn encrypt(shared: &Shared, peer: &BareJid, wanted: bool, body: &str) 
             peer_keys += 1;
         }
     }
+    tracing::debug!(account = %shared.jid, %peer, keys = ?keys.iter().filter_map(|k| k.attr("rid")).collect::<Vec<_>>(), "encrypted");
     if peer_keys == 0 {
         return Outgoing::Failed(format!(
             "none of {peer}'s OMEMO devices is trusted or reachable"
@@ -775,6 +779,7 @@ pub async fn decrypt(shared: &Session, sender: &BareJid, encrypted: &Encrypted) 
     };
     let header = &encrypted.header;
     let device = header.sid;
+    tracing::debug!(account = %shared.jid, %sender, own_id, rids = ?header.keys.iter().map(|k| k.rid).collect::<Vec<_>>(), "decrypting");
     let Some(key) = header.keys.iter().find(|k| k.rid == own_id) else {
         return Decrypted::Failed("the message was not encrypted for this device".into());
     };

@@ -160,7 +160,8 @@ pub trait Conversation {
     /// One page of history, newest last, older than `before_id` ("" = newest).
     fn get_messages(&self, before_id: &str, limit: u32) -> zbus::Result<Vec<Dict>>;
 
-    /// Sends a message; returns its id.
+    /// Sends a message; returns its id. Options: "reply-to" (s), the id
+    /// of the message this one answers.
     fn send(
         &self,
         body: &str,
@@ -169,6 +170,15 @@ pub trait Conversation {
 
     /// Clears Unread and tells the contact we have read up to here.
     fn mark_read(&self) -> zbus::Result<()>;
+
+    /// Corrects one of our messages.
+    fn correct(&self, id: &str, body: &str) -> zbus::Result<()>;
+
+    /// Sets our reactions to a message; an empty list removes them.
+    fn react(&self, id: &str, emojis: &[&str]) -> zbus::Result<()>;
+
+    /// Retracts one of our messages.
+    fn retract(&self, id: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn message_added(&self, message: Dict) -> zbus::Result<()>;

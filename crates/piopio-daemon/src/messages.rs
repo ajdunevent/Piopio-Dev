@@ -29,6 +29,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Str, Value};
 use piopio_dbus::CONVERSATION_API_VERSION;
 
 use crate::access;
+use crate::rich;
 use crate::session::{Session, Shared, new_id, now_ms};
 use crate::store::{ConversationRow, MessageRow, NewMessage, state};
 
@@ -283,6 +284,33 @@ async fn handle(
         }
     }
 
+    let sender_jid = if outgoing {
+        session.jid.to_string()
+    } else {
+        peer.to_string()
+    };
+
+    // Retractions and reactions change an earlier message and are not
+    // messages themselves (their bodies are only fallbacks).
+    if let Some(target) = rich::retraction(&message) {
+        if let Ok((conversation, _)) = session.conversations.get(session, &peer).await
+            && let Ok(Some(row)) = session.store.find_message(conversation, target).await
+        {
+            rich::retract(session, conversation, row, outgoing).await;
+        }
+        return;
+    }
+    if let Some((target, emojis)) = rich::reactions(&message) {
+        if let Ok((conversation, _)) = session.conversations.get(session, &peer).await
+            && let Ok(Some(row)) = session.store.find_message(conversation, target).await
+        {
+            rich::react(session, conversation, row, sender_jid, emojis).await;
+        }
+        return;
+    }
+    let replaces = rich::correction(&message);
+    let reply = rich::reply(&message);
+
     let encrypted = message.extract_payload::<Encrypted>().ok().flatten();
     let plain_body = message.get_best_body_cloned(vec![]).map(|(_, b)| b);
     if encrypted.is_none() && plain_body.is_none() {
@@ -335,7 +363,9 @@ async fn handle(
                 }
                 crate::omemo::Decrypted::KeyTransport => return,
                 crate::omemo::Decrypted::Failed(why) => {
-                    if encrypted.payload.is_none() {
+                    // A correction we can't read (often one seen before)
+                    // must not turn into a message of its own.
+                    if encrypted.payload.is_none() || replaces.is_some() {
                         return;
                     }
                     tracing::info!(%peer, "an OMEMO message could not be decrypted: {why}");
@@ -345,6 +375,38 @@ async fn handle(
         }
     };
 
+    // A reply's quote is only there for older clients.
+    let (body, quote) = rich::strip_fallback(&message, rich::REPLY, &body);
+    let conversation = session
+        .conversations
+        .get(session, &peer)
+        .await
+        .ok()
+        .map(|(id, _)| id);
+
+    if let (Some(target), Some(conversation)) = (replaces, conversation) {
+        let row = session
+            .store
+            .find_message(conversation, target)
+            .await
+            .ok()
+            .flatten();
+        if rich::correct(session, conversation, row, outgoing, body.clone()).await {
+            return;
+        }
+    }
+
+    let (reply_to, reply_to_sender, reply_preview) = match (reply, conversation) {
+        (Some((id, to)), Some(conversation)) => {
+            let preview = match session.store.find_message(conversation, id.clone()).await {
+                Ok(Some(row)) if !row.retracted => rich::preview(&row.body),
+                _ => rich::unquote(&quote),
+            };
+            (id, to, preview)
+        }
+        _ => Default::default(),
+    };
+
     let new = NewMessage {
         origin_id,
         server_id: server_id.clone(),
@@ -352,6 +414,9 @@ async fn handle(
         sender: sender.to_string(),
         body,
         timestamp,
+        reply_to,
+        reply_to_sender,
+        reply_preview,
         state: if outgoing {
             state::SENT
         } else {
@@ -543,6 +608,83 @@ pub async fn catch_up(session: &Session) {
     tracing::info!(jid = %session.jid, "caught up with the archive");
 }
 
+/// Sends a chat message carrying `body`, encrypted when OMEMO applies, plus
+/// `extra` elements. Tracked messages ask for receipts and markers. Returns
+/// the state reached and the encryption used.
+async fn deliver(
+    session: &Session,
+    peer: &BareJid,
+    wanted: bool,
+    id: &str,
+    body: &str,
+    extra: Vec<tokio_xmpp::minidom::Element>,
+    tracked: bool,
+) -> (&'static str, &'static str) {
+    let mut message =
+        Message::chat(Some(Jid::from(peer.clone()))).with_payload(OriginId { id: id.to_owned() });
+    if tracked {
+        message = message
+            .with_payload(receipts::Request)
+            .with_payload(Markable);
+    }
+    message.id = Some(Id(id.to_owned()));
+    let used = match crate::omemo::encrypt(session, peer, wanted, body).await {
+        crate::omemo::Outgoing::Plain => {
+            message.bodies.insert(Lang::default(), body.to_owned());
+            "none"
+        }
+        crate::omemo::Outgoing::Encrypted(encrypted) => {
+            message
+                .bodies
+                .insert(Lang::default(), crate::omemo::FALLBACK_BODY.to_owned());
+            message.payloads.push(encrypted);
+            message.payloads.push(
+                ExplicitMessageEncryption {
+                    namespace: ns::LEGACY_OMEMO.to_owned(),
+                    name: Some("OMEMO".to_owned()),
+                }
+                .into(),
+            );
+            message.payloads.push(rich::store_hint());
+            "omemo"
+        }
+        crate::omemo::Outgoing::Failed(why) => {
+            tracing::warn!(%peer, "not sending: {why}");
+            return (state::FAILED, "none");
+        }
+    };
+    message.payloads.extend(extra);
+    (wait_sent(session, message).await, used)
+}
+
+/// Sends a message whose content needs no encryption (reactions, retractions).
+async fn send_plain(
+    session: &Session,
+    peer: &BareJid,
+    body: Option<&str>,
+    extra: Vec<tokio_xmpp::minidom::Element>,
+) -> &'static str {
+    let id = new_id();
+    let mut message =
+        Message::chat(Some(Jid::from(peer.clone()))).with_payload(OriginId { id: id.clone() });
+    message.id = Some(Id(id));
+    if let Some(body) = body {
+        message.bodies.insert(Lang::default(), body.to_owned());
+    }
+    message.payloads.extend(extra);
+    wait_sent(session, message).await
+}
+
+async fn wait_sent(session: &Session, message: Message) -> &'static str {
+    match session.send(message).await {
+        None => state::FAILED,
+        Some(mut token) => match token.wait_for(StanzaStage::Sent).await {
+            Some(StanzaState::Sent { .. } | StanzaState::Acked { .. }) => state::SENT,
+            _ => state::FAILED,
+        },
+    }
+}
+
 fn str_value(s: impl Into<String>) -> OwnedValue {
     OwnedValue::from(Str::from(s.into()))
 }
@@ -562,7 +704,38 @@ pub fn message_dict(m: &MessageRow) -> HashMap<String, OwnedValue> {
     map.insert("timestamp".into(), OwnedValue::from(m.timestamp));
     map.insert("state".into(), str_value(m.state.clone()));
     map.insert("encryption".into(), str_value(m.encryption.clone()));
+    map.insert("edited".into(), OwnedValue::from(m.edited));
+    map.insert("retracted".into(), OwnedValue::from(m.retracted));
+    map.insert("reply-to".into(), str_value(m.reply_to.clone()));
+    map.insert(
+        "reply-to-sender".into(),
+        str_value(m.reply_to_sender.clone()),
+    );
+    map.insert("reply-preview".into(), str_value(m.reply_preview.clone()));
+    map.insert("reactions".into(), rich::reactions_owned(&m.reactions));
     map
+}
+
+/// Tells the UI that something about a stored message changed.
+pub async fn emit_changed(
+    session: &Session,
+    conversation: i64,
+    message: i64,
+    changes: HashMap<&str, Value<'_>>,
+) {
+    let Ok(path) =
+        OwnedObjectPath::try_from(format!("{}/conversation/{conversation}", session.path))
+    else {
+        return;
+    };
+    if let Some(iface) = session.conversations.iface(session, &path).await {
+        let _ = ConversationObject::message_changed(
+            iface.signal_emitter(),
+            &message.to_string(),
+            changes,
+        )
+        .await;
+    }
 }
 
 /// `net.dunevent.Piopio.Conversation`, at `<account>/conversation/<id>`.
@@ -580,6 +753,23 @@ impl ConversationObject {
 
     fn peer_jid(&self) -> Option<BareJid> {
         self.row.peer.parse().ok()
+    }
+
+    fn valid_peer(&self) -> zbus::fdo::Result<BareJid> {
+        self.peer_jid()
+            .ok_or_else(|| zbus::fdo::Error::Failed("this conversation has no valid peer".into()))
+    }
+
+    /// One of this conversation's messages, by the id the bus uses.
+    async fn target(&self, id: &str) -> zbus::fdo::Result<MessageRow> {
+        let unknown = || zbus::fdo::Error::InvalidArgs("unknown message id".into());
+        let id: i64 = id.parse().map_err(|_| unknown())?;
+        self.session
+            .store
+            .message_by_id(self.row.id, id)
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .ok_or_else(unknown)
     }
 
     async fn save(&self) {
@@ -715,20 +905,27 @@ impl ConversationObject {
 
     /// Sends a message. Returns its id right away; its state follows as
     /// MessageChanged signals (pending → sent → received → displayed).
+    /// Options: "reply-to" (s), the id of the message this one answers.
     async fn send(
         &mut self,
         #[zbus(header)] header: zbus::message::Header<'_>,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
         body: &str,
-        _options: HashMap<&str, Value<'_>>,
+        options: HashMap<&str, Value<'_>>,
     ) -> zbus::fdo::Result<String> {
         access::check(&header)?;
         if body.trim().is_empty() {
             return Err(zbus::fdo::Error::InvalidArgs("the message is empty".into()));
         }
-        let peer = self.peer_jid().ok_or_else(|| {
-            zbus::fdo::Error::Failed("this conversation has no valid peer".into())
-        })?;
+        let peer = self.valid_peer()?;
+        let reply_to = match options.get("reply-to") {
+            Some(v) => {
+                let id = <&str>::try_from(v)
+                    .map_err(|_| zbus::fdo::Error::InvalidArgs("reply-to is a string".into()))?;
+                Some(self.target(id).await?)
+            }
+            None => None,
+        };
         let origin_id = new_id();
         let encryption = crate::omemo::conversation_encryption(
             &self.session,
@@ -736,22 +933,32 @@ impl ConversationObject {
             self.row.encryption_wanted,
         )
         .await;
+        let mut new = NewMessage {
+            origin_id: origin_id.clone(),
+            server_id: None,
+            outgoing: true,
+            sender: self.session.jid.to_string(),
+            body: body.to_owned(),
+            timestamp: now_ms(),
+            state: state::PENDING,
+            encryption,
+            ..Default::default()
+        };
+        let mut extra = vec![];
+        let mut wire_body = body.to_owned();
+        if let Some(target) = &reply_to {
+            new.reply_to = target.origin_id.clone();
+            new.reply_to_sender = target.sender.clone();
+            new.reply_preview = rich::preview(&target.body);
+            let (elements, quoted) =
+                rich::reply_elements(&target.origin_id, &target.sender, &new.reply_preview, body);
+            extra = elements;
+            wire_body = quoted;
+        }
         let row = self
             .session
             .store
-            .insert_message(
-                self.row.id,
-                NewMessage {
-                    origin_id: origin_id.clone(),
-                    server_id: None,
-                    outgoing: true,
-                    sender: self.session.jid.to_string(),
-                    body: body.to_owned(),
-                    timestamp: now_ms(),
-                    state: state::PENDING,
-                    encryption,
-                },
-            )
+            .insert_message(self.row.id, new)
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
             .expect("a fresh origin id is never a duplicate");
@@ -764,46 +971,10 @@ impl ConversationObject {
         let session = self.session.clone();
         let conversation = self.row.id;
         let wanted = self.row.encryption_wanted;
-        let emitter = emitter.into_owned();
-        let message_id = row.id.to_string();
-        let body = body.to_owned();
+        let message_id = row.id;
         tokio::spawn(async move {
-            let mut message = Message::chat(Some(Jid::from(peer.clone())))
-                .with_payload(OriginId {
-                    id: origin_id.clone(),
-                })
-                .with_payload(receipts::Request)
-                .with_payload(Markable);
-            message.id = Some(Id(origin_id.clone()));
-            let mut used = "none";
-            let new_state = match crate::omemo::encrypt(&session, &peer, wanted, &body).await {
-                crate::omemo::Outgoing::Plain => {
-                    message.bodies.insert(Lang::default(), body);
-                    None
-                }
-                crate::omemo::Outgoing::Encrypted(encrypted) => {
-                    used = "omemo";
-                    message
-                        .bodies
-                        .insert(Lang::default(), crate::omemo::FALLBACK_BODY.to_owned());
-                    message.payloads.push(encrypted);
-                    message.payloads.push(
-                        ExplicitMessageEncryption {
-                            namespace: ns::LEGACY_OMEMO.to_owned(),
-                            name: Some("OMEMO".to_owned()),
-                        }
-                        .into(),
-                    );
-                    message.payloads.push(
-                        tokio_xmpp::minidom::Element::builder("store", "urn:xmpp:hints").build(),
-                    );
-                    None
-                }
-                crate::omemo::Outgoing::Failed(why) => {
-                    tracing::warn!(%peer, "not sending: {why}");
-                    Some(state::FAILED)
-                }
-            };
+            let (new_state, used) =
+                deliver(&session, &peer, wanted, &origin_id, &wire_body, extra, true).await;
             if used != encryption
                 && let Ok(true) = session
                     .store
@@ -811,28 +982,140 @@ impl ConversationObject {
                     .await
             {
                 let changes = HashMap::from([("encryption", Value::from(used))]);
-                let _ = Self::message_changed(&emitter, &message_id, changes).await;
+                emit_changed(&session, conversation, message_id, changes).await;
             }
-            let new_state = match new_state {
-                Some(failed) => failed,
-                None => match session.send(message).await {
-                    None => state::FAILED,
-                    Some(mut token) => match token.wait_for(StanzaStage::Sent).await {
-                        Some(StanzaState::Sent { .. } | StanzaState::Acked { .. }) => state::SENT,
-                        _ => state::FAILED,
-                    },
-                },
-            };
             if let Ok(Some(row)) = session
                 .store
                 .advance_state(conversation, origin_id, new_state)
                 .await
             {
                 let changes = HashMap::from([("state", Value::from(row.state))]);
-                let _ = Self::message_changed(&emitter, &message_id, changes).await;
+                emit_changed(&session, conversation, message_id, changes).await;
             }
         });
         Ok(row.id.to_string())
+    }
+
+    /// Corrects one of our messages (XEP-0308).
+    async fn correct(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        id: &str,
+        body: &str,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        if body.trim().is_empty() {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "a correction can't be empty; retract the message instead".into(),
+            ));
+        }
+        let peer = self.valid_peer()?;
+        let target = self.target(id).await?;
+        if !target.outgoing || target.retracted {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "only your own messages can be corrected".into(),
+            ));
+        }
+        let mut wire_body = body.to_owned();
+        let mut extra = vec![rich::replace(&target.origin_id)];
+        if !target.reply_to.is_empty() {
+            let (elements, quoted) = rich::reply_elements(
+                &target.reply_to,
+                &target.reply_to_sender,
+                &target.reply_preview,
+                body,
+            );
+            extra.extend(elements);
+            wire_body = quoted;
+        }
+        let (state, _) = deliver(
+            &self.session,
+            &peer,
+            self.row.encryption_wanted,
+            &new_id(),
+            &wire_body,
+            extra,
+            false,
+        )
+        .await;
+        if state == state::FAILED {
+            return Err(zbus::fdo::Error::Failed(
+                "the correction could not be sent".into(),
+            ));
+        }
+        rich::correct(
+            &self.session,
+            self.row.id,
+            Some(target),
+            true,
+            body.to_owned(),
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Sets our reactions to a message (XEP-0444); an empty list removes them.
+    async fn react(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        id: &str,
+        emojis: Vec<String>,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let peer = self.valid_peer()?;
+        let target = self.target(id).await?;
+        let mut unique: Vec<String> = Vec::new();
+        for e in emojis {
+            let e = e.trim().to_owned();
+            if !e.is_empty() && !unique.contains(&e) {
+                unique.push(e);
+            }
+        }
+        let extra = vec![
+            rich::reactions_element(&target.origin_id, &unique),
+            rich::store_hint(),
+        ];
+        if send_plain(&self.session, &peer, None, extra).await == state::FAILED {
+            return Err(zbus::fdo::Error::Failed(
+                "the reaction could not be sent".into(),
+            ));
+        }
+        rich::react(
+            &self.session,
+            self.row.id,
+            target,
+            self.session.jid.to_string(),
+            unique,
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Retracts one of our messages (XEP-0424): everyone's clients that
+    /// support it remove it.
+    async fn retract(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        id: &str,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let peer = self.valid_peer()?;
+        let target = self.target(id).await?;
+        if !target.outgoing {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "only your own messages can be retracted".into(),
+            ));
+        }
+        let extra = rich::retract_elements(&target.origin_id);
+        if send_plain(&self.session, &peer, Some(rich::RETRACT_FALLBACK), extra).await
+            == state::FAILED
+        {
+            return Err(zbus::fdo::Error::Failed(
+                "the retraction could not be sent".into(),
+            ));
+        }
+        rich::retract(&self.session, self.row.id, target, true).await;
+        Ok(())
     }
 
     /// The user has seen everything: clears Unread and, for contacts who share

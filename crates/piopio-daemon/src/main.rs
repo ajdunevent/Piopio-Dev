@@ -14,6 +14,7 @@ mod login;
 mod messages;
 mod notify;
 mod omemo;
+mod rich;
 mod roster;
 mod session;
 mod store;

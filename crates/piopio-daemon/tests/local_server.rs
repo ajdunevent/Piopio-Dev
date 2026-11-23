@@ -85,8 +85,13 @@ async fn contacts_chat_receipts_and_markers() {
         .unwrap();
     assert_eq!(text(&bob_entry, "name"), "Bob");
 
-    alice.wait_published(&alice_path).await;
-    bob.wait_published(&bob_path).await;
+    let alice_device = alice.wait_published(&alice_path).await;
+    let bob_device = bob.wait_published(&bob_path).await;
+    alice
+        .wait_device(&alice_path, "bob@localhost", bob_device)
+        .await;
+    bob.wait_device(&bob_path, "alice@localhost", alice_device)
+        .await;
 
     // Alice writes; Bob receives; Alice sees the receipt. Both use OMEMO,
     // so the message is encrypted without anyone asking for it.
