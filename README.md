@@ -23,17 +23,35 @@ difference, and OMEMO is on from the first message.
 - **Contacts:** roster with versioning, presence, adding and renaming
   contacts, accepting or declining contact requests.
 - **One-to-one chat:** sending and receiving, delivery receipts and read
-  markers, Carbons for your other devices, and catch-up from the server
-  archive (MAM) after being offline; duplicates are dropped.
+  markers, typing notifications, Carbons for your other devices, and
+  catch-up from the server archive (MAM) after being offline; duplicates are
+  dropped.
+- **OMEMO** (`eu.siacs.conversations.axolotl`, what Conversations, Dino,
+  Gajim, Monal and Converse.js speak): on by default whenever the other
+  side has it, implemented in pure Rust in `piopio-omemo` and checked in CI
+  against python-oldmemo in both directions. Blind Trust Before
+  Verification, fingerprints and per-device trust in the Encryption dialog.
+  Messages are never sent in the clear to someone who uses OMEMO.
+- **Replies, corrections, reactions, deleting for everyone** (XEP-0461,
+  0308, 0444, 0424), from a message's menu (right click or long press).
+- **Group chats:** joining (Ctrl+J), history from the room's archive,
+  occupants, bookmarks shared with your other devices, leaving and
+  rejoining. Not encrypted yet.
+- **Files:** sharing through the server's upload service, encrypted
+  (`aesgcm://`) in OMEMO chats; pictures download by themselves and get
+  thumbnails made by the daemon.
+- **Avatars:** contacts' pictures, and setting your own in Accounts.
 - **Background:** the daemon runs with no window, asks the Background portal
   for autostart inside Flatpak, and shows notifications through the
-  Notification portal while no window is open. Clicking one opens the chat.
+  Notification portal while no window is open (in group chats only when
+  you're mentioned). Clicking one opens the chat.
 - **Window:** conversation list, chat with an always-visible Send button,
-  delivery ticks, Add Account, New Chat, Accounts; adapts down to 360px.
+  delivery ticks, Add Account, New Chat, Join Group Chat, Accounts; adapts
+  down to 360px.
 
-Not yet: OMEMO (milestone 2), group chats, files, avatars, reactions,
-corrections, calls, Client State Indication (blocked on tokio-xmpp sending
-nonzas), direct TLS and SASL2/FAST.
+Not yet: OMEMO in group chats, OMEMO 2, Jingle file transfer, calls,
+Client State Indication (blocked on tokio-xmpp sending nonzas), direct TLS
+and SASL2/FAST.
 
 ## Layout
 
@@ -42,6 +60,7 @@ nonzas), direct TLS and SASL2/FAST.
 | `crates/piopio-daemon` | The background service (`net.dunevent.Piopio.Daemon`) |
 | `crates/piopio` | The UI (`net.dunevent.Piopio`) |
 | `crates/piopio-dbus` | Bus names, object paths and client proxies shared by both |
+| `crates/piopio-omemo` | OMEMO (X3DH, Double Ratchet, XEdDSA) in pure Rust, sans I/O |
 | `tests/server` | A throwaway local Prosody for the end-to-end tests |
 | `data/` | Desktop file, metainfo, D-Bus service file, icons |
 | `build-aux/` | Flatpak manifest for the GNOME 51 runtime |
