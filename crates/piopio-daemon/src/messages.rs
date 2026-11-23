@@ -992,19 +992,35 @@ async fn mark(session: &Session, peer: &BareJid, origin_id: &str, new_state: &'s
     let Ok((id, path)) = session.conversations.get(session, peer).await else {
         return;
     };
-    if let Ok(Some(row)) = session
-        .store
-        .advance_state(id, origin_id.to_owned(), new_state)
-        .await
-        && let Some(iface) = session.conversations.iface(session, &path).await
-    {
-        let changes = HashMap::from([("state", Value::from(row.state.clone()))]);
-        let _ = ConversationObject::message_changed(
-            iface.signal_emitter(),
-            &row.id.to_string(),
-            changes,
-        )
-        .await;
+    let rows = if new_state == state::DISPLAYED {
+        session
+            .store
+            .displayed_up_to(id, origin_id.to_owned())
+            .await
+            .unwrap_or_default()
+    } else {
+        session
+            .store
+            .advance_state(id, origin_id.to_owned(), new_state)
+            .await
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect()
+    };
+    if rows.is_empty() {
+        return;
+    }
+    if let Some(iface) = session.conversations.iface(session, &path).await {
+        for row in rows {
+            let changes = HashMap::from([("state", Value::from(row.state.clone()))]);
+            let _ = ConversationObject::message_changed(
+                iface.signal_emitter(),
+                &row.id.to_string(),
+                changes,
+            )
+            .await;
+        }
     }
 }
 

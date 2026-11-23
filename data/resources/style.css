@@ -30,7 +30,7 @@
 
 /* The chat. */
 .chat-history { background: none; padding: 6px 12px; }
-.chat-history > row { padding: 3px 0; background: none; }
+.chat-history > row { padding: 6px 0 1px 0; background: none; }
 .message-sender { font-weight: bold; font-size: smaller; margin: 0 8px 1px 8px; }
 .bubble { border-radius: 14px; padding: 6px 10px; margin: 0 2px; }
 .bubble.incoming { background-color: alpha(currentColor, 0.08); }
@@ -41,9 +41,8 @@
 .message.incoming { margin-right: 40px; }
 .message.outgoing { margin-left: 40px; }
 .bubble.outgoing .dim-label { color: inherit; opacity: 0.75; }
-.message-state { opacity: 0.6; }
-.message-state.read { opacity: 1; font-weight: 900; }
-.bubble.outgoing .message-state { color: inherit; }
+.message-state { opacity: 0.8; }
+.chat-history > row.continued { padding-top: 0; }
 .undecryptable { font-style: italic; opacity: 0.7; }
 .bubble .quote {
   border-left: 3px solid alpha(currentColor, 0.5);

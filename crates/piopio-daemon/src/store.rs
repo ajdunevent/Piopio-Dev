@@ -704,6 +704,45 @@ impl Store {
         })
         .await
     }
+
+    /// A read marker (XEP-0333) covers the message it names and every one
+    /// we sent before it: marks them all displayed, returning those changed.
+    pub async fn displayed_up_to(
+        &self,
+        conversation: i64,
+        origin_id: String,
+    ) -> anyhow::Result<Vec<MessageRow>> {
+        self.with(move |db| {
+            let target: Option<(i64, i64)> = db
+                .query_row(
+                    "SELECT timestamp, id FROM messages WHERE conversation_id = ?1
+                     AND origin_id = ?2 AND outgoing = 1",
+                    params![conversation, origin_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((timestamp, id)) = target else {
+                return Ok(vec![]);
+            };
+            let mut q = db.prepare(&format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ?1
+                 AND outgoing = 1 AND state IN ('pending', 'sent', 'received')
+                 AND (timestamp < ?2 OR (timestamp = ?2 AND id <= ?3))"
+            ))?;
+            let mut rows: Vec<MessageRow> = q
+                .query_map(params![conversation, timestamp, id], message_from_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            for row in &mut rows {
+                db.execute(
+                    "UPDATE messages SET state = ?2 WHERE id = ?1",
+                    params![row.id, state::DISPLAYED],
+                )?;
+                row.state = state::DISPLAYED.to_owned();
+            }
+            Ok(rows)
+        })
+        .await
+    }
 }
 
 /// A group chat we take part in (or took part in).

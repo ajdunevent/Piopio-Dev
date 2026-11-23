@@ -52,6 +52,12 @@ pub struct ChatPage {
     peer_name: RefCell<String>,
     peer_picture: RefCell<Option<gdk::Texture>>,
     own_picture: RefCell<Option<gdk::Texture>>,
+    /// Each message's picture and name, shown only on the first of a run.
+    decorations: RefCell<HashMap<String, (adw::Avatar, gtk::Label)>>,
+    /// What the peer's apps support; empty while unknown.
+    peer_features: RefCell<Vec<String>>,
+    attach: gtk::Button,
+    video_call: RefCell<Option<gtk::Button>>,
     /// Who is in a group chat, and leaving or rejoining it.
     people: gtk::MenuButton,
     is_room: Cell<bool>,
@@ -99,11 +105,19 @@ impl ChatPage {
             .menu_model(&menu)
             .build();
         header.pack_end(&more);
+        // Shown once the peer's apps are known to take calls.
         let call = gtk::Button::builder()
             .icon_name("call-start-symbolic")
             .tooltip_text("Call")
+            .visible(false)
+            .build();
+        let video_call = gtk::Button::builder()
+            .icon_name("camera-video-symbolic")
+            .tooltip_text("Video Call")
+            .visible(false)
             .build();
         header.pack_end(&call);
+        header.pack_end(&video_call);
         header.pack_end(&people);
 
         let messages = gtk::ListBox::builder()
@@ -223,6 +237,10 @@ impl ChatPage {
             peer_name: RefCell::default(),
             peer_picture: RefCell::default(),
             own_picture: RefCell::default(),
+            decorations: RefCell::default(),
+            peer_features: RefCell::default(),
+            attach: attach.clone(),
+            video_call: RefCell::default(),
             people,
             is_room: Cell::new(false),
             me: RefCell::new(me),
@@ -281,7 +299,10 @@ impl ChatPage {
                 return glib::Propagation::Proceed;
             };
             match key {
-                gdk::Key::Up if this.entry.text().is_empty() => {
+                gdk::Key::Up
+                    if this.entry.text().is_empty()
+                        && this.peer_supports("urn:xmpp:message-correct:0") =>
+                {
                     if let Some(id) = this.last_own_message() {
                         this.set_mode(Mode::Edit(id));
                         return glib::Propagation::Stop;
@@ -311,12 +332,24 @@ impl ChatPage {
                 b.set_sensitive(false);
                 let b = b.clone();
                 glib::spawn_future_local(async move {
-                    this.start_call().await;
+                    this.start_call(false).await;
+                    b.set_sensitive(true);
+                });
+            }
+        });
+        let weak = Rc::downgrade(&this);
+        video_call.connect_clicked(move |b| {
+            if let Some(this) = weak.upgrade() {
+                b.set_sensitive(false);
+                let b = b.clone();
+                glib::spawn_future_local(async move {
+                    this.start_call(true).await;
                     b.set_sensitive(true);
                 });
             }
         });
         this.call_button.replace(Some(call));
+        this.video_call.replace(Some(video_call));
 
         // Load older messages when scrolled to the top.
         let weak = Rc::downgrade(&this);
@@ -350,16 +383,15 @@ impl ChatPage {
                 this.page.set_title(&name);
                 if kind == "room" {
                     this.is_room.set(true);
-                    if let Some(b) = this.call_button.borrow().as_ref() {
-                        b.set_visible(false);
-                    }
                     this.setup_room().await;
                 }
             }
             this.follow_encryption();
+            this.follow_server_features();
             if !this.is_room.get() {
                 this.follow_typing();
                 this.follow_blocked();
+                this.follow_peer_features();
             }
             this.load_pictures().await;
             this.load_older().await;
@@ -591,7 +623,7 @@ impl ChatPage {
     }
 
     /// Calls the peer: through the account that owns this conversation.
-    async fn start_call(self: &Rc<Self>) {
+    async fn start_call(self: &Rc<Self>, video: bool) {
         let Some(window) = self.window.upgrade() else {
             return;
         };
@@ -613,13 +645,82 @@ impl ChatPage {
         let peer = self.proxy.clone();
         let started = run(async move {
             let jid = peer.peer().await?;
-            proxy.start_call(&jid, false).await
+            proxy.start_call(&jid, video).await
         })
         .await;
         match started {
             Ok(path) => crate::calls::open(&window, path).await,
             Err(e) => window.toast(&format!("Couldn’t call: {}", client::explain(&e))),
         }
+    }
+
+    /// Whether the peer's apps support `feature`. Unknown (no answer yet,
+    /// or a group chat) counts as yes, except for calls, which need it known.
+    fn peer_supports(&self, feature: &str) -> bool {
+        let features = self.peer_features.borrow();
+        features.is_empty() || features.iter().any(|f| f == feature)
+    }
+
+    /// Call buttons for peers whose apps take Jingle calls (rung with
+    /// XEP-0353), and whatever else depends on their features.
+    fn follow_peer_features(self: &Rc<Self>) {
+        let changes = {
+            let proxy = self.proxy.clone();
+            client::forward(move || async move {
+                let first = proxy.peer_features().await.unwrap_or_default();
+                let later = proxy.receive_peer_features_changed().await;
+                Some(
+                    futures_util::stream::once(async move { first })
+                        .chain(later.filter_map(|c| async move { c.get().await.ok() })),
+                )
+            })
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(features) = changes.recv().await {
+                let Some(this) = weak.upgrade() else { break };
+                let has = |f: &str| features.iter().any(|x| x == f);
+                let rings = has("urn:xmpp:jingle-message:0") && has("urn:xmpp:jingle:1");
+                if let Some(b) = this.call_button.borrow().as_ref() {
+                    b.set_visible(rings && has("urn:xmpp:jingle:apps:rtp:audio"));
+                }
+                if let Some(b) = this.video_call.borrow().as_ref() {
+                    b.set_visible(rings && has("urn:xmpp:jingle:apps:rtp:video"));
+                }
+                *this.peer_features.borrow_mut() = features;
+            }
+        });
+    }
+
+    /// Hides Share a File when the server has no upload service.
+    fn follow_server_features(self: &Rc<Self>) {
+        let Some(account) = self.window.upgrade().and_then(|w| {
+            w.accounts
+                .borrow()
+                .iter()
+                .find(|a| a.path.as_str() == self.account)
+                .map(|a| a.proxy.clone())
+        }) else {
+            return;
+        };
+        let changes = client::forward(move || async move {
+            let first = account.server_features().await.unwrap_or_default();
+            let later = account.receive_server_features_changed().await;
+            Some(
+                futures_util::stream::once(async move { first })
+                    .chain(later.filter_map(|c| async move { c.get().await.ok() })),
+            )
+        });
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(features) = changes.recv().await {
+                let Some(this) = weak.upgrade() else { break };
+                // Unknown (empty) until the server answers: keep it.
+                this.attach.set_visible(
+                    features.is_empty() || features.iter().any(|f| f == "urn:xmpp:http:upload:0"),
+                );
+            }
+        });
     }
 
     /// Details and delete, for the conversation menu.
@@ -771,6 +872,7 @@ impl ChatPage {
         for (row, m) in rows {
             row.set_child(Some(&self.message(&m)));
         }
+        self.regroup();
     }
 
     pub fn confirm_delete(self: &Rc<Self>) {
@@ -919,6 +1021,7 @@ impl ChatPage {
                 let row = self.row(m);
                 self.messages.prepend(&row);
             }
+            self.regroup();
             let scroller = self.scroller.clone();
             glib::idle_add_local_once(move || {
                 let adj = scroller.vadjustment();
@@ -931,12 +1034,57 @@ impl ChatPage {
     fn append(self: &Rc<Self>, m: &Dict) {
         let row = self.row(m);
         self.messages.append(&row);
+        self.regroup();
+    }
+
+    /// Shows the picture and name only on the first message of a run: the
+    /// same sender, each within five minutes of the one before.
+    fn regroup(&self) {
+        const GAP_MS: i64 = 5 * 60 * 1000;
+        let rows = self.rows.borrow();
+        let decorations = self.decorations.borrow();
+        let mut previous: Option<(String, i64)> = None;
+        let mut child = self.messages.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            let id = widget.widget_name();
+            let Some((_, m)) = rows.get(id.as_str()) else {
+                continue;
+            };
+            let sender = if flag(m, "outgoing") {
+                String::new()
+            } else if self.is_room.get() {
+                text(m, "sender")
+            } else {
+                // Any of the peer's devices.
+                text(m, "sender").split('/').next().unwrap_or("").to_owned()
+            };
+            let at = m
+                .get("timestamp")
+                .and_then(|v| i64::try_from(v).ok())
+                .unwrap_or(0);
+            let first = previous
+                .as_ref()
+                .is_none_or(|(s, t)| *s != sender || at - t > GAP_MS);
+            if let Some((avatar, label)) = decorations.get(id.as_str()) {
+                // Hidden, the picture still holds its place so bubbles line up.
+                avatar.set_opacity(if first { 1.0 } else { 0.0 });
+                label.set_visible(first);
+            }
+            if first {
+                widget.remove_css_class("continued");
+            } else {
+                widget.add_css_class("continued");
+            }
+            previous = Some((sender, at));
+        }
     }
 
     fn row(self: &Rc<Self>, m: &Dict) -> gtk::ListBoxRow {
         let row = gtk::ListBoxRow::builder()
             .activatable(false)
             .selectable(false)
+            .name(text(m, "id"))
             .build();
         row.set_child(Some(&self.message(m)));
         self.rows
@@ -954,6 +1102,7 @@ impl ChatPage {
         }
         row.set_child(Some(&self.message(&m)));
         self.rows.borrow_mut().insert(id.to_owned(), (row, m));
+        self.regroup();
     }
 
     /// A message with the sender's picture and name beside it: on the left
@@ -995,6 +1144,9 @@ impl ChatPage {
         if let Some(column) = column.downcast_ref::<gtk::Box>() {
             column.prepend(&label);
         }
+        self.decorations
+            .borrow_mut()
+            .insert(text(m, "id"), (avatar.clone(), label.clone()));
         let line = gtk::Box::builder()
             .spacing(6)
             .halign(if outgoing {
@@ -1115,15 +1267,14 @@ impl ChatPage {
         );
         if outgoing {
             let state = text(m, "state");
-            let tick = gtk::Label::builder()
-                .label(tick(&state))
-                .tooltip_text(state_name(&state))
-                .css_classes(["caption", "message-state"])
-                .build();
-            if state == "displayed" {
-                tick.add_css_class("read");
-            }
-            meta.append(&tick);
+            meta.append(
+                &gtk::Image::builder()
+                    .icon_name(state_icon(&state))
+                    .tooltip_text(state_name(&state))
+                    .pixel_size(14)
+                    .css_classes(["message-state"])
+                    .build(),
+            );
         }
         bubble.append(&meta);
 
@@ -1386,7 +1537,11 @@ impl ChatPage {
             .spacing(2)
             .build();
 
-        let emojis = gtk::Box::builder().spacing(2).build();
+        let can_react = self.peer_supports("urn:xmpp:reactions:0");
+        let can_edit = self.peer_supports("urn:xmpp:message-correct:0");
+        let can_retract = self.peer_supports("urn:xmpp:message-retract:1")
+            || self.peer_supports("urn:xmpp:message-retract:0");
+        let emojis = gtk::Box::builder().spacing(2).visible(can_react).build();
         for emoji in QUICK_REACTIONS {
             let b = gtk::Button::builder()
                 .label(*emoji)
@@ -1433,12 +1588,14 @@ impl ChatPage {
                 }
             }),
         ));
-        if outgoing {
+        if outgoing && can_edit {
             let edit_id = id.to_owned();
             content.append(&item(
                 "Edit",
                 Box::new(move |this| this.set_mode(Mode::Edit(edit_id.clone()))),
             ));
+        }
+        if outgoing && can_retract {
             let delete_id = id.to_owned();
             content.append(&item(
                 "Delete for Everyone",
@@ -1652,13 +1809,15 @@ fn texture(path: &str) -> Option<gdk::Texture> {
         .flatten()
 }
 
-fn tick(state: &str) -> &'static str {
+/// One icon that grows as the message goes further: sending (…), sent to
+/// the server (one check), delivered to a device (two), read (three).
+fn state_icon(state: &str) -> &'static str {
     match state {
-        "pending" => "◷",
-        "sent" => "✓",
-        "received" => "✓✓",
-        "displayed" => "✓✓",
-        "failed" => "!",
+        "pending" => "message-sending-symbolic",
+        "sent" => "message-sent-symbolic",
+        "received" => "message-delivered-symbolic",
+        "displayed" => "message-read-symbolic",
+        "failed" => "dialog-warning-symbolic",
         _ => "",
     }
 }
@@ -1666,7 +1825,7 @@ fn tick(state: &str) -> &'static str {
 fn state_name(state: &str) -> &'static str {
     match state {
         "pending" => "Sending",
-        "sent" => "Sent",
+        "sent" => "Sent to the server",
         "received" => "Delivered",
         "displayed" => "Read",
         "failed" => "Not sent",

@@ -139,13 +139,29 @@ async fn contacts_chat_receipts_and_markers() {
     })
     .await;
 
-    // Bob reads it; Alice sees the displayed marker.
+    // A second message; Bob reads both. His marker names only the newest,
+    // but covers the first too.
+    let second_id = alice_chat
+        .send("Are you there?", HashMap::new())
+        .await
+        .unwrap();
+    wait_for(20, "Bob to receive the second message", || async {
+        bob_chat
+            .get_messages("", 50)
+            .await
+            .unwrap()
+            .iter()
+            .any(|m| text(m, "body") == "Are you there?")
+            .then_some(())
+    })
+    .await;
     bob_chat.mark_read().await.unwrap();
     assert_eq!(bob_chat.unread().await.unwrap(), 0);
     wait_for(20, "the displayed marker", || async {
-        (state_of(sent_id.clone()).await == "displayed").then_some(())
+        (state_of(second_id.clone()).await == "displayed").then_some(())
     })
     .await;
+    assert_eq!(state_of(sent_id.clone()).await, "displayed");
 
     // Bob answers; Alice's conversation shows both, oldest first.
     bob_chat.send("Hi Alice", HashMap::new()).await.unwrap();
@@ -158,9 +174,10 @@ async fn contacts_chat_receipts_and_markers() {
     })
     .await;
     let messages = alice_chat.get_messages("", 50).await.unwrap();
-    let messages = &messages[messages.len() - 2..];
+    let messages = &messages[messages.len() - 3..];
     assert_eq!(text(&messages[0], "body"), "Hello Bob");
-    assert_eq!(text(&messages[1], "body"), "Hi Alice");
+    assert_eq!(text(&messages[1], "body"), "Are you there?");
+    assert_eq!(text(&messages[2], "body"), "Hi Alice");
     for m in messages {
         assert_eq!(text(m, "encryption"), "omemo2", "{m:?}");
     }

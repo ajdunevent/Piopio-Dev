@@ -291,15 +291,9 @@ pub fn new_chat(window: &Rc<Window>) {
         .title("Address")
         .input_purpose(gtk::InputPurpose::Email)
         .build();
-    let add_contact = adw::SwitchRow::builder()
-        .title("Add to Contacts")
-        .subtitle("Lets you see when they're online")
-        .active(true)
-        .build();
     let group = adw::PreferencesGroup::new();
     group.add(&account_row);
     group.add(&address);
-    group.add(&add_contact);
     let start = gtk::Button::builder()
         .label("Start Chat")
         .css_classes(["pill", "suggested-action"])
@@ -357,8 +351,15 @@ pub fn new_chat(window: &Rc<Window>) {
                 let (proxy, roster) = (account.proxy.clone(), account.roster.clone());
                 let target = jid.clone();
                 let result = run(async move {
-                    if add {
-                        // Already a contact? Then this only re-asks for presence.
+                    // Someone new becomes a contact, which asks to see each
+                    // other's status; existing contacts are left as they are.
+                    let known = roster
+                        .get_contacts()
+                        .await
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|c| text(c, "jid") == target);
+                    if add && !known {
                         let _ = roster.add_contact(&target, &name, &[]).await;
                     }
                     proxy.start_chat(&target).await
@@ -376,15 +377,8 @@ pub fn new_chat(window: &Rc<Window>) {
         }
     };
     start.connect_clicked({
-        let (open_chat, address, add_contact) =
-            (open_chat.clone(), address.clone(), add_contact.clone());
-        move |_| {
-            open_chat(
-                address.text().trim().to_string(),
-                add_contact.is_active(),
-                String::new(),
-            )
-        }
+        let (open_chat, address) = (open_chat.clone(), address.clone());
+        move |_| open_chat(address.text().trim().to_string(), true, String::new())
     });
 
     // List the selected account's contacts.
@@ -502,10 +496,21 @@ pub fn accounts(window: &Rc<Window>) {
             .build();
         row.add_prefix(&choose);
         {
-            let (proxy, picture) = (account.proxy.clone(), picture.clone());
+            let (proxy, picture, choose) = (account.proxy.clone(), picture.clone(), choose.clone());
             glib::spawn_future_local(async move {
-                let path = run(async move { proxy.avatar().await.unwrap_or_default() }).await;
+                let (path, features) = run(async move {
+                    (
+                        proxy.avatar().await.unwrap_or_default(),
+                        proxy.server_features().await.unwrap_or_default(),
+                    )
+                })
+                .await;
                 crate::window::set_avatar_image(&picture, &path);
+                // Pictures are stored with PEP; without it they can't be set.
+                if !features.is_empty() && !features.iter().any(|f| f == "pep") {
+                    choose.set_sensitive(false);
+                    choose.set_tooltip_text(Some("Your server can’t store a picture"));
+                }
             });
         }
         {

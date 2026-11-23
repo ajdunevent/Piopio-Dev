@@ -34,6 +34,8 @@ struct Loaded {
     /// The account's defaults for typing notifications and read receipts.
     default_chat_states: bool,
     default_receipts: bool,
+    /// Whether the server supports blocking (also while unknown).
+    can_block: bool,
     /// The roster entry, if the peer is a contact.
     contact: Option<Dict>,
     /// Group chats: subject, whether private, how many people.
@@ -88,6 +90,10 @@ async fn load(
             blocked: c.blocked().await.unwrap_or(false),
             default_chat_states: proxy.send_chat_states().await.unwrap_or(true),
             default_receipts: proxy.send_receipts().await.unwrap_or(true),
+            can_block: {
+                let f = proxy.server_features().await.unwrap_or_default();
+                f.is_empty() || f.iter().any(|f| f == "urn:xmpp:blocking")
+            },
             peer,
             room,
             contact,
@@ -359,7 +365,9 @@ fn build(
         .spacing(12)
         .halign(gtk::Align::Center)
         .build();
-    if !d.room {
+    // Blocking needs the server's support (XEP-0191); unblocking stays
+    // possible either way.
+    if !d.room && (d.can_block || d.blocked) {
         let block = gtk::Button::builder()
             .label(if d.blocked { "_Unblock" } else { "_Block…" })
             .use_underline(true)
