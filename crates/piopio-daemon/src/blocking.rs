@@ -40,17 +40,19 @@ pub async fn online(session: &Session) {
     if !session.features.server_has(crate::features::BLOCKING) {
         return;
     }
+    // The list stays locked until the answer is in, so a block made
+    // meanwhile waits rather than being overwritten by the older answer.
+    // (Pushes are handled outside the task that matches IQ answers, so
+    // waiting here can't hold up the answer.)
+    let mut list = session.blocked.0.lock().await;
     let query = Element::builder("blocklist", NS).build();
     let Ok(Some(reply)) = session.iq(crate::pep::get(None, query)).await else {
         return;
     };
     let fresh: HashSet<String> = items(&reply).collect();
-    let changed: Vec<String> = {
-        let mut list = session.blocked.0.lock().await;
-        let changed = list.symmetric_difference(&fresh).cloned().collect();
-        *list = fresh;
-        changed
-    };
+    let changed: Vec<String> = list.symmetric_difference(&fresh).cloned().collect();
+    *list = fresh;
+    drop(list);
     for jid in changed {
         session.conversations.blocked_changed(session, &jid).await;
     }
@@ -91,9 +93,10 @@ pub async fn set(session: &Session, jid: &BareJid, blocked: bool) -> Result<(), 
     let request = Element::builder(if blocked { "block" } else { "unblock" }, NS)
         .append(item)
         .build();
+    // Locked first: waits for the list fetched after connecting.
+    let mut list = session.blocked.0.lock().await;
     session.iq(crate::pep::set(None, request)).await?;
     // Servers push to every resource, us included, but don't wait on it.
-    let mut list = session.blocked.0.lock().await;
     let changed = if blocked {
         list.insert(jid.to_string())
     } else {
