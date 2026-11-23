@@ -1,32 +1,55 @@
 //! One open conversation: its history and the box to write in.
 //!
 //! The send button is always there, so sending works the same with an
-//! on-screen keyboard as with Enter.
+//! on-screen keyboard as with Enter. A message's menu (right click or long
+//! press) replies, reacts, edits or deletes; Up in an empty box edits the
+//! last message sent.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use adw::{glib, gtk};
+use adw::{gdk, glib, gtk};
 use futures_util::StreamExt;
 use piopio_dbus::{ConversationProxy, Dict};
+use zbus::zvariant::{OwnedValue, Value};
 
 use crate::client::{self, run};
 use crate::window::Window;
 
 const PAGE: u32 = 50;
+/// The reactions offered in a message's menu.
+const QUICK_REACTIONS: &[&str] = &["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+type MenuAction = Box<dyn Fn(&Rc<ChatPage>)>;
+
+/// What the composer is doing besides writing a new message.
+#[derive(Clone, Default, PartialEq)]
+enum Mode {
+    #[default]
+    New,
+    /// Replying to the message with this id.
+    Reply(String),
+    /// Correcting our message with this id.
+    Edit(String),
+}
 
 pub struct ChatPage {
     pub page: adw::NavigationPage,
     proxy: ConversationProxy<'static>,
+    window: std::rc::Weak<Window>,
     own_jid: String,
     lock: gtk::Button,
     messages: gtk::ListBox,
     scroller: gtk::ScrolledWindow,
     entry: gtk::Entry,
-    /// Bubble state labels by message id, to update ticks in place.
-    states: RefCell<HashMap<String, gtk::Label>>,
+    /// Shown above the box while replying or editing.
+    mode_bar: gtk::Box,
+    mode_label: gtk::Label,
+    mode: RefCell<Mode>,
+    /// Rows and their messages by message id, to update them in place.
+    rows: RefCell<HashMap<String, (gtk::ListBoxRow, Dict)>>,
     oldest: RefCell<String>,
     loading: Cell<bool>,
     at_start: Cell<bool>,
@@ -62,6 +85,28 @@ impl ChatPage {
             .child(&clamp)
             .build();
 
+        let mode_label = gtk::Label::builder()
+            .hexpand(true)
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["caption"])
+            .build();
+        let mode_cancel = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Cancel")
+            .css_classes(["flat", "circular"])
+            .build();
+        let mode_bar = gtk::Box::builder()
+            .spacing(6)
+            .margin_start(12)
+            .margin_end(6)
+            .margin_top(4)
+            .visible(false)
+            .css_classes(["composer-mode"])
+            .build();
+        mode_bar.append(&mode_label);
+        mode_bar.append(&mode_cancel);
+
         let entry = gtk::Entry::builder()
             .hexpand(true)
             .placeholder_text("Unencrypted Message")
@@ -74,15 +119,20 @@ impl ChatPage {
             .valign(gtk::Align::Center)
             .sensitive(false)
             .build();
-        let composer = gtk::Box::builder()
+        let row = gtk::Box::builder()
             .spacing(6)
             .margin_start(6)
             .margin_end(6)
             .margin_top(6)
             .margin_bottom(6)
             .build();
-        composer.append(&entry);
-        composer.append(&send);
+        row.append(&entry);
+        row.append(&send);
+        let composer = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .build();
+        composer.append(&mode_bar);
+        composer.append(&row);
         let composer = adw::Clamp::builder()
             .maximum_size(800)
             .child(&composer)
@@ -98,13 +148,17 @@ impl ChatPage {
         let this = Rc::new(Self {
             page,
             proxy: proxy.clone(),
+            window: Rc::downgrade(window),
             own_jid,
             lock: lock.clone(),
             messages,
             scroller,
             entry: entry.clone(),
-            states: RefCell::new(HashMap::new()),
-            oldest: RefCell::new(String::new()),
+            mode_bar,
+            mode_label,
+            mode: RefCell::default(),
+            rows: RefCell::default(),
+            oldest: RefCell::default(),
             loading: Cell::new(false),
             at_start: Cell::new(false),
         });
@@ -114,10 +168,9 @@ impl ChatPage {
             move |e| send.set_sensitive(!e.text().trim().is_empty())
         });
         let weak = Rc::downgrade(&this);
-        let window_weak = Rc::downgrade(window);
         let do_send = move || {
-            if let (Some(this), Some(window)) = (weak.upgrade(), window_weak.upgrade()) {
-                this.send(&window);
+            if let Some(this) = weak.upgrade() {
+                this.send();
             }
         };
         entry.connect_activate({
@@ -127,9 +180,41 @@ impl ChatPage {
         send.connect_clicked(move |_| do_send());
 
         let weak = Rc::downgrade(&this);
-        let window_weak = Rc::downgrade(window);
+        mode_cancel.connect_clicked(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.set_mode(Mode::New);
+            }
+        });
+
+        // Up in an empty box edits the last message we sent; Escape cancels.
+        let keys = gtk::EventControllerKey::new();
+        let weak = Rc::downgrade(&this);
+        keys.connect_key_pressed(move |_, key, _, _| {
+            let Some(this) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            match key {
+                gdk::Key::Up if this.entry.text().is_empty() => {
+                    if let Some(id) = this.last_own_message() {
+                        this.set_mode(Mode::Edit(id));
+                        return glib::Propagation::Stop;
+                    }
+                }
+                gdk::Key::Escape if *this.mode.borrow() != Mode::New => {
+                    this.set_mode(Mode::New);
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
+            }
+            glib::Propagation::Proceed
+        });
+        entry.add_controller(keys);
+
+        let weak = Rc::downgrade(&this);
         lock.connect_clicked(move |_| {
-            if let (Some(this), Some(window)) = (weak.upgrade(), window_weak.upgrade()) {
+            if let Some(this) = weak.upgrade()
+                && let Some(window) = this.window.upgrade()
+            {
                 crate::encryption::show(&window, this.proxy.clone(), this.own_jid.clone());
             }
         });
@@ -199,12 +284,8 @@ impl ChatPage {
                     if stick {
                         this.scroll_to_end();
                     }
-                } else if let Some(label) = this.states.borrow().get(&id)
-                    && let Some(state) = dict.get("state")
-                    && let Ok(state) = <&str>::try_from(state)
-                {
-                    label.set_label(tick(state));
-                    label.set_tooltip_text(Some(state_name(state)));
+                } else {
+                    this.update(&id, dict);
                 }
             }
         });
@@ -266,7 +347,7 @@ impl ChatPage {
             let adj = self.scroller.vadjustment();
             let from_bottom = adj.upper() - adj.value();
             for m in page.iter().rev() {
-                let row = self.bubble(m);
+                let row = self.row(m);
                 self.messages.prepend(&row);
             }
             let scroller = self.scroller.clone();
@@ -278,42 +359,100 @@ impl ChatPage {
         self.loading.set(false);
     }
 
-    fn append(&self, m: &Dict) {
-        let row = self.bubble(m);
+    fn append(self: &Rc<Self>, m: &Dict) {
+        let row = self.row(m);
         self.messages.append(&row);
     }
 
-    fn bubble(&self, m: &Dict) -> gtk::ListBoxRow {
-        let outgoing = m
-            .get("outgoing")
-            .and_then(|v| bool::try_from(v).ok())
-            .unwrap_or(false);
+    fn row(self: &Rc<Self>, m: &Dict) -> gtk::ListBoxRow {
+        let row = gtk::ListBoxRow::builder()
+            .activatable(false)
+            .selectable(false)
+            .build();
+        row.set_child(Some(&self.bubble(m)));
+        self.rows
+            .borrow_mut()
+            .insert(text(m, "id"), (row.clone(), m.clone()));
+        row
+    }
+
+    /// Applies a MessageChanged: merges the changes and redraws the bubble.
+    fn update(self: &Rc<Self>, id: &str, changes: Dict) {
+        let found = self.rows.borrow().get(id).cloned();
+        let Some((row, mut m)) = found else { return };
+        for (k, v) in changes {
+            m.insert(k, v);
+        }
+        row.set_child(Some(&self.bubble(&m)));
+        self.rows.borrow_mut().insert(id.to_owned(), (row, m));
+    }
+
+    fn bubble(self: &Rc<Self>, m: &Dict) -> gtk::Widget {
+        let id = text(m, "id");
+        let outgoing = flag(m, "outgoing");
+        let retracted = flag(m, "retracted");
         let encryption = text(m, "encryption");
         let undecryptable = encryption == "omemo-failed";
+
+        let bubble = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .css_classes(["bubble", if outgoing { "outgoing" } else { "incoming" }])
+            .build();
+
+        let preview = text(m, "reply-preview");
+        if !text(m, "reply-to").is_empty() && !retracted {
+            let who = text(m, "reply-to-sender");
+            let who = if who == self.own_jid {
+                "You".to_owned()
+            } else {
+                who
+            };
+            let quote = gtk::Label::builder()
+                .label(format!("{who}\n{preview}"))
+                .xalign(0.0)
+                .wrap(true)
+                .lines(3)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .css_classes(["quote", "caption"])
+                .build();
+            bubble.append(&quote);
+        }
+
+        let (body_text, dimmed) = if retracted {
+            ("This message was deleted".to_owned(), true)
+        } else if undecryptable {
+            (
+                "This message was encrypted for other devices and can’t be read here.".to_owned(),
+                true,
+            )
+        } else {
+            (text(m, "body"), false)
+        };
         let body = gtk::Label::builder()
-            .label(if undecryptable {
-                "This message was encrypted for other devices and can’t be read here.".to_owned()
-            } else {
-                text(m, "body")
-            })
-            .css_classes(if undecryptable {
-                vec!["undecryptable"]
-            } else {
-                vec![]
-            })
+            .label(body_text)
             .wrap(true)
             .wrap_mode(gtk::pango::WrapMode::WordChar)
-            .selectable(true)
+            .selectable(!dimmed)
             .xalign(0.0)
             .build();
-        let time = gtk::Label::builder()
-            .label(time_of(m))
-            .css_classes(["caption", "dim-label"])
-            .build();
+        if dimmed {
+            body.add_css_class("undecryptable");
+        }
+        bubble.append(&body);
+
         let meta = gtk::Box::builder()
             .spacing(4)
             .halign(gtk::Align::End)
             .build();
+        if flag(m, "edited") && !retracted {
+            meta.append(
+                &gtk::Label::builder()
+                    .label("edited")
+                    .css_classes(["caption", "dim-label"])
+                    .build(),
+            );
+        }
         if encryption == "omemo-untrusted" {
             meta.append(
                 &gtk::Image::builder()
@@ -323,34 +462,304 @@ impl ChatPage {
                     .build(),
             );
         }
-        meta.append(&time);
+        meta.append(
+            &gtk::Label::builder()
+                .label(time_of(m))
+                .css_classes(["caption", "dim-label"])
+                .build(),
+        );
         if outgoing {
             let state = text(m, "state");
-            let label = gtk::Label::builder()
-                .label(tick(&state))
-                .tooltip_text(state_name(&state))
-                .css_classes(["caption", "message-state"])
-                .build();
-            meta.append(&label);
-            self.states.borrow_mut().insert(text(m, "id"), label);
+            meta.append(
+                &gtk::Label::builder()
+                    .label(tick(&state))
+                    .tooltip_text(state_name(&state))
+                    .css_classes(["caption", "message-state"])
+                    .build(),
+            );
         }
-        let bubble = gtk::Box::builder()
+        bubble.append(&meta);
+
+        let column = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(2)
-            .css_classes(["bubble", if outgoing { "outgoing" } else { "incoming" }])
             .halign(if outgoing {
                 gtk::Align::End
             } else {
                 gtk::Align::Start
             })
+            .css_classes([if outgoing { "outgoing" } else { "incoming" }])
             .build();
-        bubble.append(&body);
-        bubble.append(&meta);
-        gtk::ListBoxRow::builder()
-            .child(&bubble)
-            .activatable(false)
-            .selectable(false)
-            .build()
+        column.append(&bubble);
+        let all = reactions(m);
+        if !all.is_empty() {
+            column.append(&self.reaction_bar(&id, &all, outgoing));
+        }
+
+        if !retracted && !undecryptable {
+            self.attach_menu(&bubble, &id, outgoing);
+        }
+        column.upcast()
+    }
+
+    /// Reaction chips under a message; tapping one adds or removes ours.
+    fn reaction_bar(
+        self: &Rc<Self>,
+        id: &str,
+        all: &HashMap<String, Vec<String>>,
+        outgoing: bool,
+    ) -> gtk::Box {
+        // Count each emoji, in a stable order.
+        let mut counts: Vec<(String, usize, bool)> = Vec::new();
+        let mut senders: Vec<&String> = all.keys().collect();
+        senders.sort();
+        for sender in senders {
+            for emoji in &all[sender] {
+                let mine = *sender == self.own_jid;
+                match counts.iter_mut().find(|(e, _, _)| e == emoji) {
+                    Some(entry) => {
+                        entry.1 += 1;
+                        entry.2 |= mine;
+                    }
+                    None => counts.push((emoji.clone(), 1, mine)),
+                }
+            }
+        }
+        let bar = gtk::Box::builder()
+            .spacing(4)
+            .halign(if outgoing {
+                gtk::Align::End
+            } else {
+                gtk::Align::Start
+            })
+            .css_classes(["reactions"])
+            .build();
+        for (emoji, count, mine) in counts {
+            let chip = gtk::ToggleButton::builder()
+                .label(format!("{emoji} {count}"))
+                .active(mine)
+                .tooltip_text(if mine {
+                    "Remove your reaction"
+                } else {
+                    "React with this too"
+                })
+                .css_classes(["reaction"])
+                .build();
+            let weak = Rc::downgrade(self);
+            let id = id.to_owned();
+            chip.connect_clicked(move |_| {
+                if let Some(this) = weak.upgrade() {
+                    this.toggle_reaction(&id, &emoji);
+                }
+            });
+            bar.append(&chip);
+        }
+        bar
+    }
+
+    fn attach_menu(self: &Rc<Self>, bubble: &gtk::Box, id: &str, outgoing: bool) {
+        let open = {
+            let weak = Rc::downgrade(self);
+            let bubble = bubble.clone();
+            let id = id.to_owned();
+            move |x: f64, y: f64| {
+                if let Some(this) = weak.upgrade() {
+                    this.menu(&bubble, &id, outgoing, x, y);
+                }
+            }
+        };
+        // Captured before the text's own menu (the body is selectable).
+        let click = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
+        let open2 = open.clone();
+        click.connect_pressed(move |g, _, x, y| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            open2(x, y);
+        });
+        bubble.add_controller(click);
+        let press = gtk::GestureLongPress::builder()
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
+        press.connect_pressed(move |g, x, y| {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            open(x, y);
+        });
+        bubble.add_controller(press);
+    }
+
+    fn menu(self: &Rc<Self>, bubble: &gtk::Box, id: &str, outgoing: bool, x: f64, y: f64) {
+        let popover = gtk::Popover::builder()
+            .pointing_to(&gdk::Rectangle::new(x as i32, y as i32, 1, 1))
+            .build();
+        popover.set_parent(bubble);
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(2)
+            .build();
+
+        let emojis = gtk::Box::builder().spacing(2).build();
+        for emoji in QUICK_REACTIONS {
+            let b = gtk::Button::builder()
+                .label(*emoji)
+                .tooltip_text("React")
+                .css_classes(["flat", "circular"])
+                .build();
+            let (weak, id, p) = (Rc::downgrade(self), id.to_owned(), popover.clone());
+            b.connect_clicked(move |_| {
+                p.popdown();
+                if let Some(this) = weak.upgrade() {
+                    this.toggle_reaction(&id, emoji);
+                }
+            });
+            emojis.append(&b);
+        }
+        content.append(&emojis);
+
+        let item = |label: &str, action: MenuAction| {
+            let text = gtk::Label::builder().label(label).xalign(0.0).build();
+            let b = gtk::Button::builder()
+                .child(&text)
+                .css_classes(["flat"])
+                .build();
+            let (weak, p) = (Rc::downgrade(self), popover.clone());
+            b.connect_clicked(move |_| {
+                p.popdown();
+                if let Some(this) = weak.upgrade() {
+                    action(&this);
+                }
+            });
+            b
+        };
+        let reply_id = id.to_owned();
+        content.append(&item(
+            "Reply",
+            Box::new(move |this| this.set_mode(Mode::Reply(reply_id.clone()))),
+        ));
+        let copy_id = id.to_owned();
+        content.append(&item(
+            "Copy Text",
+            Box::new(move |this| {
+                if let Some((_, m)) = this.rows.borrow().get(&copy_id) {
+                    this.entry.clipboard().set_text(&text(m, "body"));
+                }
+            }),
+        ));
+        if outgoing {
+            let edit_id = id.to_owned();
+            content.append(&item(
+                "Edit",
+                Box::new(move |this| this.set_mode(Mode::Edit(edit_id.clone()))),
+            ));
+            let delete_id = id.to_owned();
+            content.append(&item(
+                "Delete for Everyone",
+                Box::new(move |this| this.confirm_retract(delete_id.clone())),
+            ));
+        }
+        popover.set_child(Some(&content));
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
+    }
+
+    fn set_mode(self: &Rc<Self>, mode: Mode) {
+        let message = |id: &str| self.rows.borrow().get(id).map(|(_, m)| m.clone());
+        match &mode {
+            Mode::New => {
+                if matches!(*self.mode.borrow(), Mode::Edit(_)) {
+                    self.entry.set_text("");
+                }
+                self.mode_bar.set_visible(false);
+            }
+            Mode::Reply(id) => {
+                let Some(m) = message(id) else { return };
+                let first = text(&m, "body").lines().next().unwrap_or("").to_owned();
+                self.mode_label.set_label(&format!("Replying to “{first}”"));
+                self.mode_bar.set_visible(true);
+            }
+            Mode::Edit(id) => {
+                let Some(m) = message(id) else { return };
+                self.entry.set_text(&text(&m, "body"));
+                self.entry.set_position(-1);
+                self.mode_label.set_label("Editing message");
+                self.mode_bar.set_visible(true);
+            }
+        }
+        *self.mode.borrow_mut() = mode;
+        self.entry.grab_focus();
+    }
+
+    /// The newest message we sent that can still be edited.
+    fn last_own_message(&self) -> Option<String> {
+        let rows = self.rows.borrow();
+        rows.values()
+            .filter(|(_, m)| flag(m, "outgoing") && !flag(m, "retracted"))
+            .max_by_key(|(_, m)| {
+                (
+                    m.get("timestamp")
+                        .and_then(|v| i64::try_from(v).ok())
+                        .unwrap_or(0),
+                    text(m, "id").parse::<i64>().unwrap_or(0),
+                )
+            })
+            .map(|(_, m)| text(m, "id"))
+    }
+
+    fn toggle_reaction(self: &Rc<Self>, id: &str, emoji: &str) {
+        let Some((_, m)) = self.rows.borrow().get(id).cloned() else {
+            return;
+        };
+        let mut mine = reactions(&m).remove(&self.own_jid).unwrap_or_default();
+        if let Some(i) = mine.iter().position(|e| e == emoji) {
+            mine.remove(i);
+        } else {
+            mine.push(emoji.to_owned());
+        }
+        let (proxy, id) = (self.proxy.clone(), id.to_owned());
+        let window = self.window.clone();
+        glib::spawn_future_local(async move {
+            let result = run(async move {
+                let refs: Vec<&str> = mine.iter().map(String::as_str).collect();
+                proxy.react(&id, &refs).await
+            })
+            .await;
+            if let (Err(e), Some(w)) = (result, window.upgrade()) {
+                w.toast(&format!("Reaction not sent: {}", client::explain(&e)));
+            }
+        });
+    }
+
+    fn confirm_retract(self: &Rc<Self>, id: String) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let ask = adw::AlertDialog::new(
+            Some("Delete for Everyone?"),
+            Some(
+                "The message is removed here and for everyone whose app supports it. Others may already have read it.",
+            ),
+        );
+        ask.add_responses(&[("cancel", "_Cancel"), ("delete", "_Delete")]);
+        ask.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        let proxy = self.proxy.clone();
+        let w = Rc::downgrade(&window);
+        ask.connect_response(None, move |_, response| {
+            if response != "delete" {
+                return;
+            }
+            let (proxy, id, w) = (proxy.clone(), id.clone(), w.clone());
+            glib::spawn_future_local(async move {
+                let result = run(async move { proxy.retract(&id).await }).await;
+                if let (Err(e), Some(w)) = (result, w.upgrade()) {
+                    w.toast(&format!("Not deleted: {}", client::explain(&e)));
+                }
+            });
+        });
+        ask.present(Some(&window.window));
     }
 
     fn near_end(&self) -> bool {
@@ -366,23 +775,37 @@ impl ChatPage {
         });
     }
 
-    fn send(self: &Rc<Self>, window: &Rc<Window>) {
+    fn send(self: &Rc<Self>) {
         let body = self.entry.text().to_string();
         if body.trim().is_empty() {
             return;
         }
+        let mode = self.mode.borrow().clone();
         self.entry.set_text("");
+        *self.mode.borrow_mut() = Mode::New;
+        self.mode_bar.set_visible(false);
         // Keep typing after tapping Send, as with Enter.
         self.entry.grab_focus();
         let proxy = self.proxy.clone();
-        let window = window.clone();
+        let window = self.window.clone();
         let entry = self.entry.clone();
         glib::spawn_future_local(async move {
             let text = body.clone();
-            let sent =
-                run(async move { proxy.send(&text, HashMap::new()).await.map(|_| ()) }).await;
+            let sent = run(async move {
+                match mode {
+                    Mode::Edit(id) => proxy.correct(&id, &text).await,
+                    Mode::Reply(id) => {
+                        let options = HashMap::from([("reply-to", Value::from(id.as_str()))]);
+                        proxy.send(&text, options).await.map(|_| ())
+                    }
+                    Mode::New => proxy.send(&text, HashMap::new()).await.map(|_| ()),
+                }
+            })
+            .await;
             if let Err(e) = sent {
-                window.toast(&format!("Not sent: {}", client::explain(&e)));
+                if let Some(window) = window.upgrade() {
+                    window.toast(&format!("Not sent: {}", client::explain(&e)));
+                }
                 // Give the text back rather than lose it.
                 if entry.text().is_empty() {
                     entry.set_text(&body);
@@ -396,6 +819,20 @@ impl ChatPage {
 fn text(dict: &Dict, key: &str) -> String {
     dict.get(key)
         .and_then(|v| String::try_from(v.try_clone().ok()?).ok())
+        .unwrap_or_default()
+}
+
+fn flag(dict: &Dict, key: &str) -> bool {
+    dict.get(key)
+        .and_then(|v| bool::try_from(v).ok())
+        .unwrap_or(false)
+}
+
+fn reactions(dict: &Dict) -> HashMap<String, Vec<String>> {
+    dict.get("reactions")
+        .and_then(|v: &OwnedValue| {
+            HashMap::<String, Vec<String>>::try_from(v.try_clone().ok()?).ok()
+        })
         .unwrap_or_default()
 }
 

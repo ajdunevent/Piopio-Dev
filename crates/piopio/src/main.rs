@@ -43,6 +43,12 @@ const CSS: &str = r#"
 }
 row.unread .title { font-weight: bold; }
 .undecryptable { font-style: italic; opacity: 0.7; }
+.bubble .quote {
+  border-left: 3px solid alpha(currentColor, 0.5);
+  padding-left: 6px; margin-bottom: 2px; opacity: 0.85;
+}
+.reactions { margin: 0 6px; }
+button.reaction { padding: 0 8px; min-height: 24px; border-radius: 999px; font-size: smaller; }
 .fingerprint { font-family: monospace; }
 "#;
 

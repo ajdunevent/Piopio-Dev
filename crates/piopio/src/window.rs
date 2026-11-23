@@ -607,7 +607,13 @@ fn text(dict: &Dict, key: &str) -> String {
 }
 
 fn preview(m: &Dict) -> String {
-    let body = if text(m, "encryption") == "omemo-failed" {
+    let body = if m
+        .get("retracted")
+        .and_then(|v| bool::try_from(v).ok())
+        .unwrap_or(false)
+    {
+        "Message deleted".to_owned()
+    } else if text(m, "encryption") == "omemo-failed" {
         "Encrypted message".to_owned()
     } else {
         text(m, "body")
