@@ -42,6 +42,7 @@ pub struct ChatPage {
     window: std::rc::Weak<Window>,
     own_jid: String,
     send: gtk::Button,
+    send_lock: gtk::Image,
     title: adw::WindowTitle,
     /// The account this conversation belongs to (its object path).
     account: String,
@@ -165,8 +166,29 @@ impl ChatPage {
             .build();
         // Red with an open lock until the conversation is known to be
         // encrypted.
+        // The plane, with an open padlock over its corner while unencrypted.
+        let plane = gtk::Image::builder()
+            .icon_name("paper-plane-symbolic")
+            .margin_top(4)
+            .margin_bottom(4)
+            .margin_start(4)
+            .margin_end(4)
+            .build();
+        let send_lock = gtk::Image::builder()
+            .icon_name("changes-allow-symbolic")
+            .pixel_size(10)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::End)
+            .css_classes(["send-lock"])
+            .build();
+        let send_icon = gtk::Overlay::builder()
+            .child(&plane)
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build();
+        send_icon.add_overlay(&send_lock);
         let send = gtk::Button::builder()
-            .icon_name("paper-plane-unencrypted-symbolic")
+            .child(&send_icon)
             .tooltip_text("Send Unencrypted")
             .css_classes(["destructive-action", "send"])
             .build();
@@ -230,6 +252,7 @@ impl ChatPage {
             window: Rc::downgrade(window),
             own_jid,
             send: send.clone(),
+            send_lock: send_lock.clone(),
             title: title.clone(),
             account,
             blocked_banner: blocked_banner.clone(),
@@ -982,11 +1005,11 @@ impl ChatPage {
                 let Some(this) = weak.upgrade() else { break };
                 let encrypted = encryption == "omemo" || encryption == "omemo2";
                 if encrypted {
-                    this.send.set_icon_name("paper-plane-symbolic");
+                    this.send_lock.set_visible(false);
                     this.send.set_tooltip_text(Some("Send Encrypted"));
                     this.send.set_css_classes(&["suggested-action", "send"]);
                 } else {
-                    this.send.set_icon_name("paper-plane-unencrypted-symbolic");
+                    this.send_lock.set_visible(true);
                     this.send.set_tooltip_text(Some("Send Unencrypted"));
                     this.send.set_css_classes(&["destructive-action", "send"]);
                 }
@@ -1156,12 +1179,28 @@ impl ChatPage {
             })
             .css_classes(["message", if outgoing { "outgoing" } else { "incoming" }])
             .build();
+        // The message's menu, on the side away from the sender.
+        let dots = gtk::Button::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Message Menu")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat", "circular", "message-menu"])
+            .visible(!flag(m, "retracted") && text(m, "encryption") != "omemo-failed")
+            .build();
+        let (weak, id) = (Rc::downgrade(self), text(m, "id"));
+        dots.connect_clicked(move |b| {
+            if let Some(this) = weak.upgrade() {
+                this.menu(b.upcast_ref(), &id, outgoing, None);
+            }
+        });
         if outgoing {
+            line.append(&dots);
             line.append(&column);
             line.append(&avatar);
         } else {
             line.append(&avatar);
             line.append(&column);
+            line.append(&dots);
         }
         line.upcast()
     }
@@ -1517,7 +1556,7 @@ impl ChatPage {
             let id = id.to_owned();
             move |x: f64, y: f64| {
                 if let Some(this) = weak.upgrade() {
-                    this.menu(&bubble, &id, outgoing, x, y);
+                    this.menu(bubble.upcast_ref(), &id, outgoing, Some((x, y)));
                 }
             }
         };
@@ -1542,11 +1581,21 @@ impl ChatPage {
         bubble.add_controller(press);
     }
 
-    fn menu(self: &Rc<Self>, bubble: &gtk::Box, id: &str, outgoing: bool, x: f64, y: f64) {
-        let popover = gtk::Popover::builder()
-            .pointing_to(&gdk::Rectangle::new(x as i32, y as i32, 1, 1))
-            .build();
-        popover.set_parent(bubble);
+    /// The message's menu: reactions, Reply and Copy, and for our own
+    /// messages Edit and Delete for Everyone. Points at `at` within
+    /// `parent`, or at all of it.
+    fn menu(
+        self: &Rc<Self>,
+        parent: &gtk::Widget,
+        id: &str,
+        outgoing: bool,
+        at: Option<(f64, f64)>,
+    ) {
+        let popover = gtk::Popover::new();
+        if let Some((x, y)) = at {
+            popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        }
+        popover.set_parent(parent);
         let content = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(2)

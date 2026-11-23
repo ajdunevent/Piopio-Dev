@@ -592,6 +592,7 @@ impl Window {
             .unwrap_or_default();
         let preview_label = gtk::Label::builder()
             .label(&preview_text)
+            .use_markup(true)
             .xalign(0.0)
             .hexpand(true)
             .ellipsize(gtk::pango::EllipsizeMode::End)
@@ -711,15 +712,15 @@ impl Window {
         match event {
             RowEvent::Message(m) => {
                 entry.preview_text = preview(&m, room);
-                entry.preview.set_label(&entry.preview_text);
+                entry.preview.set_markup(&entry.preview_text);
                 entry.preview.remove_css_class("typing");
             }
             RowEvent::Typing(state) => {
                 if state == "composing" {
-                    entry.preview.set_label("typing…");
+                    entry.preview.set_markup("typing…");
                     entry.preview.add_css_class("typing");
                 } else {
-                    entry.preview.set_label(&entry.preview_text);
+                    entry.preview.set_markup(&entry.preview_text);
                     entry.preview.remove_css_class("typing");
                 }
             }
@@ -847,48 +848,59 @@ fn text(dict: &Dict, key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The conversation list's line about the newest message, as Pango markup:
+/// the first line of text, or what kind of file was shared, in italics.
 fn preview(m: &Dict, room: bool) -> String {
-    let body = if m
-        .get("retracted")
-        .and_then(|v| bool::try_from(v).ok())
-        .unwrap_or(false)
-    {
-        "Message deleted".to_owned()
-    } else if text(m, "encryption") == "omemo-failed" {
-        "Encrypted message".to_owned()
-    } else {
-        text(m, "body")
+    let esc = |s: &str| glib::markup_escape_text(s).to_string();
+    let flag = |k: &str| {
+        m.get(k)
+            .and_then(|v| bool::try_from(v).ok())
+            .unwrap_or(false)
     };
-    let outgoing = m
-        .get("outgoing")
-        .and_then(|v| bool::try_from(v).ok())
-        .unwrap_or(false);
+    let body = text(m, "body");
     let first_line = body.lines().next().unwrap_or("").to_owned();
-    // A shared file's message is its link: show the file's name instead.
-    let file = text(m, "file-name");
     let is_link = first_line.starts_with("aesgcm://") || first_line.starts_with("https://");
-    let first_line =
-        if first_line.starts_with("aesgcm://") || (is_link && !text(m, "file-state").is_empty()) {
-            if file.is_empty() {
-                "File".to_owned()
-            } else {
-                file
-            }
+    let is_file = first_line.starts_with("aesgcm://")
+        || (is_link && (!text(m, "file-state").is_empty() || !text(m, "file-name").is_empty()));
+    let line = if flag("retracted") {
+        "<i>Message deleted</i>".to_owned()
+    } else if text(m, "encryption") == "omemo-failed" {
+        "<i>Encrypted message</i>".to_owned()
+    } else if is_file {
+        let mime = text(m, "file-mime");
+        let name = text(m, "file-name").to_lowercase();
+        let ext = name.rsplit('.').next().unwrap_or("");
+        let kind = if mime.starts_with("image/")
+            || matches!(
+                ext,
+                "jpg" | "jpeg" | "png" | "gif" | "webp" | "apng" | "heic"
+            ) {
+            "Image"
+        } else if mime.starts_with("video/") || matches!(ext, "mp4" | "webm" | "mkv" | "mov") {
+            "Video"
+        } else if mime.starts_with("audio/")
+            || matches!(ext, "ogg" | "opus" | "mp3" | "m4a" | "aac" | "wav")
+        {
+            "Audio"
         } else {
-            first_line
+            "File"
         };
-    if outgoing {
-        format!("Me: {first_line}")
+        format!("<i>{kind}</i>")
+    } else {
+        esc(&first_line)
+    };
+    if flag("outgoing") {
+        format!("Me: {line}")
     } else if room {
         let sender = text(m, "sender");
         let nick = sender.rsplit_once('/').map(|(_, n)| n).unwrap_or("");
         if nick.is_empty() {
-            first_line
+            line
         } else {
-            format!("{nick}: {first_line}")
+            format!("{}: {line}", esc(nick))
         }
     } else {
-        first_line
+        line
     }
 }
 
