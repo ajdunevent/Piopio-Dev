@@ -86,13 +86,13 @@ async fn audio_call() {
         eprintln!("PIOPIO_TEST_SERVER or GStreamer WebRTC missing; skipping");
         return;
     }
-    let erin = TestDaemon::start().await.unwrap();
-    let frank = TestDaemon::start().await.unwrap();
-    let (_, erin_account) = erin.add_local("erin").await;
-    let (_, _) = frank.add_local("frank").await;
+    let grace = TestDaemon::start().await.unwrap();
+    let heidi = TestDaemon::start().await.unwrap();
+    let (_, grace_account) = grace.add_local("grace").await;
+    let (_, _) = heidi.add_local("heidi").await;
 
     // Frank's UI waits for a call object to appear.
-    let manager = zbus::fdo::ObjectManagerProxy::builder(&frank.connection)
+    let manager = zbus::fdo::ObjectManagerProxy::builder(&heidi.connection)
         .destination(piopio_dbus::DAEMON_BUS_NAME)
         .unwrap()
         .path(piopio_dbus::ROOT_PATH)
@@ -102,14 +102,14 @@ async fn audio_call() {
         .unwrap();
     let mut added = manager.receive_interfaces_added().await.unwrap();
 
-    let erin_call = erin_account
-        .start_call("frank@localhost", false)
+    let grace_call = grace_account
+        .start_call("heidi@localhost", false)
         .await
         .unwrap();
-    let erin_call = call_proxy(&erin, erin_call).await;
-    assert_eq!(erin_call.state().await.unwrap(), "calling");
+    let grace_call = call_proxy(&grace, grace_call).await;
+    assert_eq!(grace_call.state().await.unwrap(), "calling");
 
-    let frank_path = tokio::time::timeout(Duration::from_secs(20), async {
+    let heidi_path = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             let s = added.next().await.unwrap();
             let a = s.args().unwrap();
@@ -123,22 +123,22 @@ async fn audio_call() {
     })
     .await
     .expect("Frank's phone rings");
-    let frank_call = call_proxy(&frank, frank_path.into()).await;
-    assert_eq!(frank_call.state().await.unwrap(), "ringing");
-    assert_eq!(frank_call.peer().await.unwrap(), "erin@localhost");
-    assert_eq!(frank_call.direction().await.unwrap(), "incoming");
+    let heidi_call = call_proxy(&heidi, heidi_path.into()).await;
+    assert_eq!(heidi_call.state().await.unwrap(), "ringing");
+    assert_eq!(heidi_call.peer().await.unwrap(), "grace@localhost");
+    assert_eq!(heidi_call.direction().await.unwrap(), "incoming");
 
-    let frank_side = tokio::spawn(run_side(frank_call.clone(), Role::Answerer));
-    frank_call.accept().await.unwrap();
-    let erin_side = tokio::spawn(run_side(erin_call.clone(), Role::Offerer));
-    let (erin_audio, frank_audio) = (erin_side.await.unwrap(), frank_side.await.unwrap());
-    assert!(erin_audio, "Erin hears Frank");
-    assert!(frank_audio, "Frank hears Erin");
-    assert_eq!(erin_call.state().await.unwrap(), "active");
+    let heidi_side = tokio::spawn(run_side(heidi_call.clone(), Role::Answerer));
+    heidi_call.accept().await.unwrap();
+    let grace_side = tokio::spawn(run_side(grace_call.clone(), Role::Offerer));
+    let (grace_audio, heidi_audio) = (grace_side.await.unwrap(), heidi_side.await.unwrap());
+    assert!(grace_audio, "Erin hears Frank");
+    assert!(heidi_audio, "Frank hears Erin");
+    assert_eq!(grace_call.state().await.unwrap(), "active");
 
-    erin_call.hangup().await.unwrap();
+    grace_call.hangup().await.unwrap();
     wait_for(20, "Frank's side to end", || async {
-        (frank_call.state().await.unwrap_or_else(|_| "ended".into()) == "ended").then_some(())
+        (heidi_call.state().await.unwrap_or_else(|_| "ended".into()) == "ended").then_some(())
     })
     .await;
 }
