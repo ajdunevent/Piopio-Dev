@@ -659,12 +659,45 @@ pub fn subscription_request(window: &Rc<Window>, account: &Rc<AccountInfo>, jid:
 
 /// Quit fully: the window and the background service, after a warning.
 pub fn quit_fully(window: &Rc<Window>) {
+    let w = window.clone();
+    glib::spawn_future_local(async move {
+        let warn = match client::bus().await {
+            Ok(bus) => run(async move { DaemonProxy::new(&bus).await?.warn_on_quit().await })
+                .await
+                .unwrap_or(true),
+            Err(_) => true,
+        };
+        if warn {
+            ask_before_quitting(&w);
+        } else {
+            quit_now(&w).await;
+        }
+    });
+}
+
+/// Ends the background service and then the window.
+async fn quit_now(window: &Rc<Window>) {
+    if let Ok(bus) = client::bus().await {
+        let _ = run(async move { DaemonProxy::new(&bus).await?.quit().await }).await;
+    }
+    if let Some(app) = window.window.application() {
+        app.quit();
+    }
+}
+
+fn ask_before_quitting(window: &Rc<Window>) {
     let ask = adw::AlertDialog::new(
         Some("Quit Piopio?"),
         Some(
             "This will fully exit and you won’t be able to receive new messages until Piopio is started again.",
         ),
     );
+    let again = gtk::CheckButton::builder()
+        .label("_Don’t show this again")
+        .use_underline(true)
+        .halign(gtk::Align::Center)
+        .build();
+    ask.set_extra_child(Some(&again));
     ask.add_responses(&[("cancel", "_Cancel"), ("quit", "_Quit")]);
     ask.set_response_appearance("quit", adw::ResponseAppearance::Destructive);
     ask.set_default_response(Some("cancel"));
@@ -674,13 +707,14 @@ pub fn quit_fully(window: &Rc<Window>) {
             return;
         }
         let Some(w) = w.upgrade() else { return };
+        let stop_asking = again.is_active();
         glib::spawn_future_local(async move {
-            if let Ok(bus) = client::bus().await {
-                let _ = run(async move { DaemonProxy::new(&bus).await?.quit().await }).await;
+            if stop_asking && let Ok(bus) = client::bus().await {
+                let _ =
+                    run(async move { DaemonProxy::new(&bus).await?.set_warn_on_quit(false).await })
+                        .await;
             }
-            if let Some(app) = w.window.application() {
-                app.quit();
-            }
+            quit_now(&w).await;
         });
     });
     ask.present(Some(&window.window));

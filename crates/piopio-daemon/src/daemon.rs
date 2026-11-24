@@ -202,6 +202,20 @@ impl Daemon {
         }
     }
 
+    /// Whether the UI warns before Quit ends the background service too.
+    /// Writable.
+    #[zbus(property)]
+    fn warn_on_quit(&self) -> bool {
+        crate::settings::get().is_none_or(|s| s.warn_on_quit())
+    }
+
+    #[zbus(property)]
+    async fn set_warn_on_quit(&mut self, on: bool) {
+        if let Some(s) = crate::settings::get() {
+            s.set_warn_on_quit(on).await;
+        }
+    }
+
     /// The default notification sound: "default" (the desktop's),
     /// "silent" or "custom" (set with SetNotificationSound). Writable with
     /// "default" or "silent".

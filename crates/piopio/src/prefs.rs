@@ -165,12 +165,14 @@ pub fn show(window: &Rc<Window>) {
             let background = daemon.run_in_background().await?;
             let login = daemon.start_at_login().await?;
             let sound = daemon.notification_sound().await?;
-            Ok::<_, zbus::Error>((daemon, background, login, sound))
+            let warn = daemon.warn_on_quit().await.unwrap_or(true);
+            Ok::<_, zbus::Error>((daemon, background, login, sound, warn))
         })
         .await;
         match loaded {
-            Ok((daemon, background, login, sound)) => {
-                build(&window, daemon, background, login, &sound).present(Some(&window.window));
+            Ok((daemon, background, login, sound, warn)) => {
+                build(&window, daemon, background, login, &sound, warn)
+                    .present(Some(&window.window));
             }
             Err(e) => window.toast(&client::explain(&e)),
         }
@@ -183,6 +185,7 @@ fn build(
     background: bool,
     login: bool,
     sound: &str,
+    warn: bool,
 ) -> adw::PreferencesDialog {
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
@@ -203,9 +206,26 @@ fn build(
         .active(login)
         .sensitive(background)
         .build();
+    let warn_on_quit = adw::SwitchRow::builder()
+        .title("Show Warning When Quitting")
+        .subtitle("Quit stops messages from arriving until Piopio starts again")
+        .active(warn)
+        .build();
     general.add(&run_background);
     general.add(&start_at_login);
+    general.add(&warn_on_quit);
     page.add(&general);
+    {
+        let (d, w) = (daemon.clone(), window.clone());
+        warn_on_quit.connect_active_notify(move |row| {
+            let (d, on, w) = (d.clone(), row.is_active(), w.clone());
+            glib::spawn_future_local(async move {
+                if let Err(e) = run(async move { d.set_warn_on_quit(on).await }).await {
+                    w.toast(&client::explain(&e));
+                }
+            });
+        });
+    }
     {
         let (d, login_row, w) = (daemon.clone(), start_at_login.clone(), window.clone());
         run_background.connect_active_notify(move |row| {

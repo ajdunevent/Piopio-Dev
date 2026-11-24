@@ -14,6 +14,7 @@ pub struct Settings {
     store: Store,
     start_at_login: AtomicBool,
     run_in_background: AtomicBool,
+    warn_on_quit: AtomicBool,
     /// "default", "silent" or "custom" (the file from [`sound_file`]).
     sound: RwLock<String>,
 }
@@ -30,6 +31,7 @@ pub async fn load(store: Store) -> Arc<Settings> {
         run_in_background: AtomicBool::new(flag(
             store.setting("run-in-background").await.ok().flatten(),
         )),
+        warn_on_quit: AtomicBool::new(flag(store.setting("warn-on-quit").await.ok().flatten())),
         sound: RwLock::new(
             store
                 .setting("notification-sound")
@@ -52,6 +54,15 @@ impl Settings {
 
     pub fn run_in_background(&self) -> bool {
         self.run_in_background.load(Ordering::SeqCst)
+    }
+
+    pub fn warn_on_quit(&self) -> bool {
+        self.warn_on_quit.load(Ordering::SeqCst)
+    }
+
+    pub async fn set_warn_on_quit(&self, on: bool) {
+        self.warn_on_quit.store(on, Ordering::SeqCst);
+        let _ = self.store.set_setting("warn-on-quit", on.to_string()).await;
     }
 
     pub fn sound(&self) -> String {

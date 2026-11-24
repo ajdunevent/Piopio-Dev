@@ -71,6 +71,12 @@ pub trait Daemon {
     #[zbus(property)]
     fn set_run_in_background(&self, on: bool) -> zbus::Result<()>;
 
+    /// Warn before quitting fully.
+    #[zbus(property)]
+    fn warn_on_quit(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn set_warn_on_quit(&self, on: bool) -> zbus::Result<()>;
+
     /// "default", "silent" or "custom".
     #[zbus(property)]
     fn notification_sound(&self) -> zbus::Result<String>;

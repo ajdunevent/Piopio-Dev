@@ -13,6 +13,9 @@ async fn app_settings() {
     assert!(proxy.run_in_background().await.unwrap());
     assert!(proxy.start_at_login().await.unwrap());
     assert_eq!(proxy.notification_sound().await.unwrap(), "default");
+    assert!(proxy.warn_on_quit().await.unwrap());
+    proxy.set_warn_on_quit(false).await.unwrap();
+    assert!(!proxy.warn_on_quit().await.unwrap());
 
     // Starting at login needs running in the background.
     proxy.set_run_in_background(false).await.unwrap();

@@ -66,7 +66,7 @@ pub struct ChatPage {
     call_button: RefCell<Option<gtk::Button>>,
     /// Who we are here: our JID, or room@service/nick in a group chat.
     me: RefCell<String>,
-    messages: gtk::ListBox,
+    messages: gtk::Box,
     scroller: gtk::ScrolledWindow,
     entry: gtk::Entry,
     /// Shown above the box while replying or editing.
@@ -74,13 +74,17 @@ pub struct ChatPage {
     mode_label: gtk::Label,
     mode: RefCell<Mode>,
     /// Rows and their messages by message id, to update them in place.
-    rows: RefCell<HashMap<String, (gtk::ListBoxRow, Dict)>>,
+    rows: RefCell<HashMap<String, (gtk::Box, Dict)>>,
     oldest: RefCell<String>,
     /// Ends "typing" after a pause.
     typing_timer: RefCell<Option<glib::SourceId>>,
     /// The subtitle when the peer isn't typing.
     subtitle: RefCell<String>,
     loading: Cell<bool>,
+    /// The view is at the end and follows new messages (see stick_to_end).
+    stuck: Cell<bool>,
+    /// Set while the view moves itself, so that isn't taken as the user's.
+    following: Cell<bool>,
     at_start: Cell<bool>,
 }
 
@@ -121,10 +125,13 @@ impl ChatPage {
         header.pack_end(&video_call);
         header.pack_end(&people);
 
-        let messages = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .css_classes(["chat-history"])
+        // A plain box, as in Sanctum's Assist: a ListBox laid its rows out
+        // taller than it measured them, so the newest spilled past the end
+        // of the scroll range.
+        let messages = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
             .valign(gtk::Align::End)
+            .css_classes(["chat-history"])
             .build();
         let clamp = adw::Clamp::builder()
             .maximum_size(800)
@@ -190,7 +197,7 @@ impl ChatPage {
         let send = gtk::Button::builder()
             .child(&send_icon)
             .tooltip_text("Send Unencrypted")
-            .css_classes(["destructive-action", "send"])
+            .css_classes(["suggested-action", "send"])
             .build();
         let linked = gtk::Box::builder()
             .hexpand(true)
@@ -279,6 +286,8 @@ impl ChatPage {
             typing_timer: RefCell::default(),
             subtitle: RefCell::default(),
             loading: Cell::new(false),
+            stuck: Cell::new(true),
+            following: Cell::new(false),
             at_start: Cell::new(false),
         });
 
@@ -376,6 +385,7 @@ impl ChatPage {
 
         // Load older messages when scrolled to the top.
         let weak = Rc::downgrade(&this);
+        this.stick_to_end();
         this.scroller.connect_edge_reached(move |_, edge| {
             if edge == gtk::PositionType::Top
                 && let Some(this) = weak.upgrade()
@@ -452,11 +462,8 @@ impl ChatPage {
             while let Ok((added, id, dict)) = events.recv().await {
                 let Some(this) = weak.upgrade() else { break };
                 if added {
-                    let stick = this.near_end();
+                    // Followed by the view if it's at the end (see stick).
                     this.append(&dict);
-                    if stick {
-                        this.scroll_to_end();
-                    }
                 } else {
                     this.update(&id, dict);
                 }
@@ -891,9 +898,9 @@ impl ChatPage {
     }
 
     fn redraw_all(self: &Rc<Self>) {
-        let rows: Vec<(gtk::ListBoxRow, Dict)> = self.rows.borrow().values().cloned().collect();
+        let rows: Vec<(gtk::Box, Dict)> = self.rows.borrow().values().cloned().collect();
         for (row, m) in rows {
-            row.set_child(Some(&self.message(&m)));
+            set_child(&row, &self.message(&m));
         }
         self.regroup();
     }
@@ -1011,7 +1018,8 @@ impl ChatPage {
                 } else {
                     this.send_lock.set_visible(true);
                     this.send.set_tooltip_text(Some("Send Unencrypted"));
-                    this.send.set_css_classes(&["destructive-action", "send"]);
+                    // The padlock badge says it; the button stays as it is.
+                    this.send.set_css_classes(&["suggested-action", "send"]);
                 }
                 this.entry.set_placeholder_text(Some(if encrypted {
                     "Encrypted Message"
@@ -1094,22 +1102,23 @@ impl ChatPage {
                 avatar.set_opacity(if first { 1.0 } else { 0.0 });
                 label.set_visible(first);
             }
-            if first {
-                widget.remove_css_class("continued");
-            } else {
-                widget.add_css_class("continued");
+            // Space above a run, none within it. Margins rather than CSS
+            // padding: the list doesn't re-measure rows when a class
+            // changes their padding, and they'd spill past their space.
+            if let Some(line) = widget.first_child() {
+                line.set_margin_top(if first { 6 } else { 0 });
             }
             previous = Some((sender, at));
         }
     }
 
-    fn row(self: &Rc<Self>, m: &Dict) -> gtk::ListBoxRow {
-        let row = gtk::ListBoxRow::builder()
-            .activatable(false)
-            .selectable(false)
+    fn row(self: &Rc<Self>, m: &Dict) -> gtk::Box {
+        let row = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .css_classes(["message-row"])
             .name(text(m, "id"))
             .build();
-        row.set_child(Some(&self.message(m)));
+        set_child(&row, &self.message(m));
         self.rows
             .borrow_mut()
             .insert(text(m, "id"), (row.clone(), m.clone()));
@@ -1123,7 +1132,7 @@ impl ChatPage {
         for (k, v) in changes {
             m.insert(k, v);
         }
-        row.set_child(Some(&self.message(&m)));
+        set_child(&row, &self.message(&m));
         self.rows.borrow_mut().insert(id.to_owned(), (row, m));
         self.regroup();
     }
@@ -1771,16 +1780,59 @@ impl ChatPage {
         ask.present(Some(&window.window));
     }
 
+    /// Keeps the view at the end while it's there: whenever the history
+    /// grows (a message from either side, a picture loading, an edit) or
+    /// the view shrinks, it follows. Scrolling up lets go; scrolling back
+    /// down to the end holds on again.
+    fn stick_to_end(self: &Rc<Self>) {
+        let adj = self.scroller.vadjustment();
+        // The size the view had when the user last scrolled: a value change
+        // that comes with a new size is layout, not the user.
+        let size = Rc::new(Cell::new((adj.upper(), adj.page_size())));
+        let follow = {
+            let weak = Rc::downgrade(self);
+            let size = size.clone();
+            move |adj: &gtk::Adjustment| {
+                let Some(this) = weak.upgrade() else { return };
+                size.set((adj.upper(), adj.page_size()));
+                // Only once layout has settled (as Sanctum's Assist does): a
+                // value set during layout is ignored by the view, and setting
+                // the same value again later doesn't move it.
+                if this.stuck.get() && !this.loading.get() {
+                    this.scroll_to_end();
+                }
+            }
+        };
+        let weak = Rc::downgrade(self);
+        let (f, size2) = (follow.clone(), size.clone());
+        adj.connect_value_changed(move |adj| {
+            let Some(this) = weak.upgrade() else { return };
+            if this.following.get() {
+                return;
+            }
+            if size2.get() != (adj.upper(), adj.page_size()) {
+                f(adj);
+            } else {
+                this.stuck.set(this.near_end());
+            }
+        });
+        adj.connect_changed(move |a| follow(a));
+    }
+
     fn near_end(&self) -> bool {
         let adj = self.scroller.vadjustment();
         adj.upper() - adj.page_size() - adj.value() < 80.0
     }
 
-    fn scroll_to_end(&self) {
-        let scroller = self.scroller.clone();
+    fn scroll_to_end(self: &Rc<Self>) {
+        self.stuck.set(true);
+        let weak = Rc::downgrade(self);
         glib::idle_add_local_once(move || {
-            let adj = scroller.vadjustment();
-            adj.set_value(adj.upper());
+            let Some(this) = weak.upgrade() else { return };
+            let adj = this.scroller.vadjustment();
+            this.following.set(true);
+            adj.set_value(adj.upper() - adj.page_size());
+            this.following.set(false);
         });
     }
 
@@ -1856,6 +1908,14 @@ fn reactions(dict: &Dict) -> HashMap<String, Vec<String>> {
             HashMap::<String, Vec<String>>::try_from(v.try_clone().ok()?).ok()
         })
         .unwrap_or_default()
+}
+
+/// Replaces a message row's only child.
+fn set_child(row: &gtk::Box, child: &gtk::Widget) {
+    while let Some(old) = row.first_child() {
+        row.remove(&old);
+    }
+    row.append(child);
 }
 
 fn time_of(m: &Dict) -> String {
