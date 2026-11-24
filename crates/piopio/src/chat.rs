@@ -1728,15 +1728,45 @@ impl ChatPage {
             "Reply",
             Box::new(move |this| this.set_mode(Mode::Reply(reply_id.clone()))),
         ));
-        let copy_id = id.to_owned();
-        content.append(&item(
-            "Copy Text",
-            Box::new(move |this| {
-                if let Some((_, m)) = this.rows.borrow().get(&copy_id) {
-                    this.entry.clipboard().set_text(&text(m, "body"));
-                }
-            }),
-        ));
+        let message = self.rows.borrow().get(id).map(|(_, m)| m.clone());
+        let file = message.as_ref().and_then(|m| {
+            let path = text(m, "file-path");
+            (text(m, "file-state") == "done" && !path.is_empty()).then(|| {
+                (
+                    path,
+                    text(m, "file-name"),
+                    text(m, "file-mime").starts_with("image/"),
+                )
+            })
+        });
+        let has_file = message
+            .as_ref()
+            .is_some_and(|m| !text(m, "file-state").is_empty());
+        if let Some((path, name, image)) = file {
+            if image {
+                let path = path.clone();
+                content.append(&item(
+                    "Copy Image",
+                    Box::new(move |this| this.copy_image(&path)),
+                ));
+            }
+            content.append(&item(
+                "Save…",
+                Box::new(move |this| this.save_file(&path, &name)),
+            ));
+        }
+        // A file's message is its link: nothing to copy as text.
+        if !has_file {
+            let copy_id = id.to_owned();
+            content.append(&item(
+                "Copy Text",
+                Box::new(move |this| {
+                    if let Some((_, m)) = this.rows.borrow().get(&copy_id) {
+                        this.entry.clipboard().set_text(&text(m, "body"));
+                    }
+                }),
+            ));
+        }
         if outgoing && can_edit {
             let edit_id = id.to_owned();
             content.append(&item(
@@ -1766,6 +1796,56 @@ impl ChatPage {
             });
         });
         popover.popup();
+    }
+
+    /// Puts a picture itself on the clipboard (the first frame, if it
+    /// moves).
+    fn copy_image(self: &Rc<Self>, path: &str) {
+        match gdk::Texture::from_filename(path) {
+            Ok(texture) => self.entry.clipboard().set_texture(&texture),
+            Err(e) => {
+                if let Some(w) = self.window.upgrade() {
+                    w.toast(&format!("Couldn’t copy the picture: {}", e.message()));
+                }
+            }
+        }
+    }
+
+    /// Asks where to save a received or sent file, and copies it there.
+    fn save_file(self: &Rc<Self>, path: &str, name: &str) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let dialog = gtk::FileDialog::builder()
+            .title("Save File")
+            .modal(true)
+            .initial_name(name)
+            .build();
+        let source = gtk::gio::File::for_path(path);
+        let w = Rc::downgrade(&window);
+        dialog.save(
+            Some(&window.window),
+            gtk::gio::Cancellable::NONE,
+            move |chosen| {
+                let Ok(dest) = chosen else { return };
+                glib::spawn_future_local(async move {
+                    let copied = source
+                        .copy_future(
+                            &dest,
+                            gtk::gio::FileCopyFlags::OVERWRITE,
+                            glib::Priority::DEFAULT,
+                        )
+                        .0
+                        .await;
+                    if let Some(w) = w.upgrade() {
+                        match copied {
+                            Ok(()) => w.toast("Saved"),
+                            Err(e) => w.toast(&format!("Couldn’t save the file: {}", e.message())),
+                        }
+                    }
+                });
+            },
+        );
     }
 
     fn set_mode(self: &Rc<Self>, mode: Mode) {
