@@ -11,7 +11,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_xmpp::connect::{
-    DnsConfig, ServerConnector, StartTlsServerConnector, TcpServerConnector,
+    DirectTlsServerConnector, DnsConfig, ServerConnector, StartTlsServerConnector,
+    TcpServerConnector,
 };
 use tokio_xmpp::jid::{BareJid, Jid};
 use tokio_xmpp::stanzastream::Connection;
@@ -107,10 +108,28 @@ async fn attempt(
     jid: &Jid,
     password: &str,
 ) -> Result<Connection, tokio_xmpp::Error> {
-    // TODO: also try direct TLS (XEP-0368), and SASL2, Bind 2 and FAST.
     match server {
         Server::Srv => {
-            let dns = DnsConfig::srv_default_client(jid.domain().as_str());
+            let domain = jid.domain().as_str();
+            // Direct TLS (XEP-0368) where the server publishes it: TLS from
+            // the first byte, often on port 443 where networks block 5222.
+            // Anything but a refused login falls back to STARTTLS.
+            if offers_direct_tls(domain).await {
+                match login(
+                    DirectTlsServerConnector::from(DnsConfig::srv_xmpps(domain)),
+                    jid,
+                    password,
+                )
+                .await
+                {
+                    Ok(connection) => return Ok(connection),
+                    Err(e @ tokio_xmpp::Error::Auth(_)) => return Err(e),
+                    Err(e) => {
+                        tracing::debug!(%jid, "direct TLS failed, trying STARTTLS: {e:?}");
+                    }
+                }
+            }
+            let dns = DnsConfig::srv_default_client(domain);
             login(StartTlsServerConnector::from(dns), jid, password).await
         }
         Server::Host { host, port } => {
@@ -121,6 +140,42 @@ async fn attempt(
             let dns = DnsConfig::addr(address);
             login(TcpServerConnector::from(dns), jid, password).await
         }
+    }
+}
+
+/// Whether `domain` publishes `_xmpps-client._tcp` SRV records (a lone "."
+/// target means it explicitly doesn't).
+async fn offers_direct_tls(domain: &str) -> bool {
+    let Ok(ascii) = idna_ascii(domain) else {
+        return false;
+    };
+    if ascii.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    let lookup = async {
+        let resolver = hickory_resolver::TokioResolver::builder_tokio()
+            .ok()?
+            .build()
+            .ok()?;
+        resolver
+            .srv_lookup(format!("_xmpps-client._tcp.{ascii}."))
+            .await
+            .ok()
+    };
+    match tokio::time::timeout(Duration::from_secs(5), lookup).await {
+        Ok(Some(records)) => records.answers().iter().any(|r| match &r.data {
+            hickory_resolver::proto::rr::RData::SRV(srv) => !srv.target.is_root(),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+fn idna_ascii(domain: &str) -> Result<String, ()> {
+    if domain.is_ascii() {
+        Ok(domain.to_ascii_lowercase())
+    } else {
+        Err(())
     }
 }
 
@@ -175,5 +230,24 @@ pub fn describe(error: &tokio_xmpp::Error, jid: &BareJid) -> String {
         }
         E::Auth(e) => format!("The server refused the login: {e}"),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn no_direct_tls_for_addresses_or_unknown_domains() {
+        assert!(!offers_direct_tls("127.0.0.1").await);
+        assert!(!offers_direct_tls("localhost").await);
+        assert!(!offers_direct_tls("nonexistent.invalid").await);
+    }
+
+    /// Needs DNS: conversations.im publishes _xmpps-client records.
+    #[tokio::test]
+    #[ignore]
+    async fn finds_direct_tls_records() {
+        assert!(offers_direct_tls("conversations.im").await);
     }
 }

@@ -40,6 +40,8 @@ jobs:
       - run: tests/server/run.sh cargo test --locked -p piopio-daemon -p piopio-dbus
         env:
           PIOPIO_SHOW_SERVER_LOG: "1"
+      - name: Direct TLS records (needs DNS)
+        run: cargo test --locked -p piopio-daemon --bin piopio-daemon finds_direct_tls_records -- --ignored
 
   # The OMEMO crate, and a cross-check against python-oldmemo (the reference
   # Gajim's and Slixmpp's OMEMO is built on) in both directions.
