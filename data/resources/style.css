@@ -67,15 +67,15 @@ button.reaction { padding: 0 8px; min-height: 24px; border-radius: 999px; font-s
 
 /* The box to write in, with Send attached, as in Sanctum's Assist. */
 .composer > .composer-box,
-.composer > button { min-height: 44px; }
+.composer > button { min-height: 36px; }
 /* The growing box looks like an entry, joined to Send. */
 .composer > .composer-box {
   background-color: alpha(currentColor, 0.1);
   border-radius: 6px 0 0 6px;
 }
 .composer-box textview, .composer-box textview > text { background: none; }
-.composer > button.send { min-width: 44px; padding: 0; }
-.composer-button { min-width: 44px; min-height: 44px; }
+.composer > button.send { min-width: 42px; padding: 0; }
+.composer-button { min-width: 36px; min-height: 36px; }
 
 /* Calls. */
 .large-button { min-width: 56px; min-height: 56px; }
