@@ -178,9 +178,12 @@ impl ChatPage {
             .pixel_size(11)
             .halign(gtk::Align::Start)
             .valign(gtk::Align::Center)
-            // Centred on the triangle's widest inner circle, with room
-            // around it.
-            .margin_start(8)
+            // Placed for the most even room between the padlock's outline
+            // and the triangle's edges: left of the icon's centre and a
+            // touch high, since the lock is wide at the bottom and the
+            // triangle narrows to the right.
+            .margin_start(6)
+            .margin_bottom(1)
             .css_classes(["send-lock", "open"])
             .build();
         let send_icon = gtk::Overlay::builder()
