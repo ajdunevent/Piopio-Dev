@@ -1048,6 +1048,16 @@ async fn store_message(
     new: NewMessage,
     unread: bool,
 ) -> Option<(MessageRow, OwnedObjectPath)> {
+    store_message_with(session, peer, new, unread, None).await
+}
+
+async fn store_message_with(
+    session: &Session,
+    peer: &BareJid,
+    new: NewMessage,
+    unread: bool,
+    attachment: Option<crate::store::AttachmentRow>,
+) -> Option<(MessageRow, OwnedObjectPath)> {
     let (id, path) = match session.conversations.get(session, peer).await {
         Ok(found) => found,
         Err(e) => {
@@ -1055,7 +1065,7 @@ async fn store_message(
             return None;
         }
     };
-    let row = match session.store.insert_message(id, new).await {
+    let mut row = match session.store.insert_message(id, new).await {
         Ok(Some(row)) => row,
         Ok(None) => return None,
         Err(e) => {
@@ -1063,6 +1073,11 @@ async fn store_message(
             return None;
         }
     };
+    if let Some(mut a) = attachment {
+        a.message_id = row.id;
+        let _ = session.store.set_attachment(a.clone()).await;
+        row.attachment = Some(a);
+    }
     if let Some(iface) = session.conversations.iface(session, &path).await {
         let emitter = iface.signal_emitter().clone();
         let _ = ConversationObject::message_added(&emitter, message_dict(&row)).await;
@@ -1083,6 +1098,47 @@ async fn store_message(
         }
     }
     Some((row, path))
+}
+
+/// Stores a message that arrived some other way than as a message stanza
+/// (a file over Jingle), counting it unread unless it is ours.
+/// Its attachment (if any) is stored first, so the message is announced
+/// with it.
+pub(crate) async fn store_incoming(
+    session: &Session,
+    peer: &BareJid,
+    new: NewMessage,
+    attachment: Option<crate::store::AttachmentRow>,
+) -> Option<(MessageRow, OwnedObjectPath)> {
+    let unread = !new.outgoing;
+    store_message_with(session, peer, new, unread, attachment).await
+}
+
+/// The stored conversation with `peer`.
+pub(crate) async fn conversation_id(session: &Session, peer: &BareJid) -> Option<i64> {
+    session
+        .conversations
+        .get(session, peer)
+        .await
+        .ok()
+        .map(|(id, _)| id)
+}
+
+/// Moves one of our messages forward, by its conversation, and tells the UI.
+pub(crate) async fn set_state(
+    session: &Session,
+    conversation: i64,
+    origin_id: &str,
+    new_state: &'static str,
+) {
+    if let Ok(Some(row)) = session
+        .store
+        .advance_state(conversation, origin_id.to_owned(), new_state)
+        .await
+    {
+        let changes = HashMap::from([("state", Value::from(row.state))]);
+        emit_changed(session, conversation, row.id, changes).await;
+    }
 }
 
 /// Moves one of our outgoing messages forward (sent → received → displayed).
@@ -2122,6 +2178,40 @@ impl ConversationObject {
             let wanted = wanted
                 && (kind == MessageType::Groupchat
                     || crate::omemo::peer_uses_omemo(&session, &peer).await);
+            // Without an upload service, straight to the contact's device
+            // over Jingle, as Conversations and Dino do (unencrypted chats
+            // only: nothing goes in the clear to someone who uses OMEMO).
+            if kind != MessageType::Groupchat && !crate::files::has_upload_service(&session).await {
+                let device = if wanted {
+                    tracing::warn!(%peer, "no upload service, and files can't go directly encrypted");
+                    None
+                } else {
+                    crate::jingle_ft::device_for(&session, &peer).await
+                };
+                match device {
+                    Some(device) => {
+                        crate::jingle_ft::send(
+                            &session,
+                            device,
+                            conversation,
+                            message_id,
+                            origin_id,
+                            attachment,
+                            data,
+                        )
+                        .await;
+                    }
+                    None => {
+                        if !wanted {
+                            tracing::warn!(%peer, "no upload service, and no device of theirs takes files");
+                        }
+                        attachment.state = crate::files::state::FAILED.into();
+                        crate::files::save_attachment(&session, conversation, &attachment).await;
+                        set_state(&session, conversation, &origin_id, state::FAILED).await;
+                    }
+                }
+                return;
+            }
             let link = crate::files::upload(&session, &name, &mime, data, wanted).await;
             let new_state = match link {
                 Err(e) => {

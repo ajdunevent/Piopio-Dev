@@ -221,6 +221,27 @@ async fn online_union(session: &Shared, jid: &BareJid) -> Option<BTreeSet<String
     Some(resources.values().flat_map(|s| s.iter().cloned()).collect())
 }
 
+/// `jid`'s online devices that support all of `features`.
+pub async fn resources_with(
+    session: &Shared,
+    jid: &BareJid,
+    features: &[&str],
+) -> Vec<tokio_xmpp::jid::FullJid> {
+    let peers = session.features.peers.lock().await;
+    let Some(resources) = peers.get(jid) else {
+        return Vec::new();
+    };
+    resources
+        .iter()
+        .filter(|(_, set)| features.iter().all(|f| set.contains(*f)))
+        .filter_map(|(resource, _)| {
+            Jid::new(&format!("{jid}/{resource}"))
+                .ok()
+                .and_then(|j| j.try_into_full().ok())
+        })
+        .collect()
+}
+
 /// What `jid`'s apps support: their online devices together, or what they
 /// last had when none is online. Empty when unknown.
 pub async fn peer(session: &Shared, jid: &str) -> Vec<String> {

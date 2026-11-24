@@ -59,7 +59,7 @@ pub async fn message(session: &Session, conversation: &OwnedObjectPath, row: &Me
     };
     let body: String = if row.encryption == "omemo-failed" {
         "Encrypted message".to_owned()
-    } else if crate::files::is_file_link(&row.body) {
+    } else if crate::files::is_file_link(&row.body) || row.attachment.is_some() {
         "Sent a file".to_owned()
     } else {
         row.body.chars().take(200).collect()

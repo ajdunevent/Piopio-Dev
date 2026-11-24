@@ -16,6 +16,7 @@ mod disco;
 mod features;
 mod files;
 mod jingle;
+mod jingle_ft;
 mod jingle_sdp;
 mod login;
 mod messages;

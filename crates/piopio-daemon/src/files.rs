@@ -258,6 +258,11 @@ fn changes(a: &AttachmentRow) -> std::collections::HashMap<&'static str, Value<'
     ])
 }
 
+/// Stores an attachment and tells the UI.
+pub async fn save_attachment(session: &Session, conversation: i64, a: &AttachmentRow) {
+    save(session, conversation, a).await;
+}
+
 async fn save(session: &Session, conversation: i64, a: &AttachmentRow) {
     if let Err(e) = session.store.set_attachment(a.clone()).await {
         tracing::error!("storing an attachment: {e:#}");
@@ -446,6 +451,10 @@ pub(crate) async fn has_upload_service(session: &Shared) -> bool {
 
 /// Finds the server's upload service and its size limit.
 async fn service(session: &Shared) -> Option<Service> {
+    // Tests can act as a server without one.
+    if std::env::var("PIOPIO_TEST_NO_UPLOAD").as_deref() == Ok("1") {
+        return None;
+    }
     let mut cached = session.uploads.service.lock().await;
     if let Some(found) = cached.clone() {
         return found;

@@ -39,6 +39,9 @@ pub const FEATURES: &[&str] = &[
     "urn:xmpp:jingle:apps:dtls:0",
     "urn:xmpp:jingle:apps:grouping:0",
     "urn:xmpp:jingle-message:0",
+    "urn:xmpp:jingle:apps:file-transfer:5",
+    "urn:xmpp:jingle:transports:ibb:1",
+    "http://jabber.org/protocol/ibb",
 ];
 
 /// The node our entity capabilities (XEP-0115) point at.

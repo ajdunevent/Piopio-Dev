@@ -81,6 +81,7 @@ pub struct Shared {
     pub rooms: crate::rooms::Rooms,
     pub uploads: crate::files::Uploads,
     pub calls: crate::jingle::Calls,
+    pub transfers: crate::jingle_ft::Transfers,
     pub blocked: crate::blocking::Blocklist,
     pub features: crate::features::Features,
     /// Client State Indication: whether the server is told a window is open.
@@ -160,6 +161,7 @@ pub fn new_shared(
         rooms: crate::rooms::Rooms::default(),
         uploads: crate::files::Uploads::default(),
         calls: crate::jingle::Calls::default(),
+        transfers: crate::jingle_ft::Transfers::default(),
         blocked: crate::blocking::Blocklist::default(),
         features: crate::features::Features::default(),
         csi: crate::csi::Csi::new(crate::activity::ui_present()),
@@ -447,7 +449,17 @@ async fn handle_stanza(shared: &Session, stanza: Stanza) {
         Stanza::Iq(Iq::Set {
             from, id, payload, ..
         }) => {
-            let reply = if payload.is("jingle", crate::jingle_sdp::JINGLE) {
+            let file_transfer = payload.is("jingle", crate::jingle_sdp::JINGLE)
+                && (crate::jingle_ft::is_offer(&payload)
+                    || crate::jingle_ft::owns(shared, payload.attr("sid").unwrap_or_default())
+                        .await);
+            let reply = if file_transfer && let Some(from) = from.clone() {
+                crate::jingle_ft::jingle_iq(shared, from, id, payload).await
+            } else if payload.ns() == crate::jingle_ft::IBB
+                && let Some(from) = from.clone()
+            {
+                crate::jingle_ft::ibb_iq(shared, from, id, payload).await
+            } else if payload.is("jingle", crate::jingle_sdp::JINGLE) {
                 crate::jingle::iq(shared, from, id, payload).await
             } else if payload.is("query", ns::ROSTER) {
                 if shared.is_own(from.as_ref()) {
