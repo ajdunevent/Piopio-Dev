@@ -277,11 +277,7 @@ fn build(
         let (w, dl, c) = (Rc::downgrade(window), dialog.downgrade(), chat.clone());
         encryption.connect_activated(move |_| {
             if let (Some(w), Some(dialog)) = (w.upgrade(), dl.upgrade()) {
-                dialog.push_subpage(&crate::encryption::page(
-                    &w,
-                    c.proxy().clone(),
-                    c.own_jid().to_owned(),
-                ));
+                dialog.push_subpage(&crate::encryption::page(&w, c.proxy().clone()));
             }
         });
     }
@@ -415,7 +411,7 @@ fn build(
             let ask = adw::AlertDialog::new(
                 Some("Block Contact?"),
                 Some(&format!(
-                    "{peer} can no longer send you messages or see your status, on any of your devices."
+                    "{peer} can no longer send you messages or see when you’re online, on any of your devices."
                 )),
             );
             ask.add_responses(&[("cancel", "_Cancel"), ("block", "_Block")]);
@@ -458,8 +454,8 @@ fn build(
     dialog
 }
 
-/// The contact's name (which can be changed here), status and whether
-/// they're in the contact list.
+/// The contact's name (which can be changed here) and whether they're in
+/// the contact list.
 fn contact_group(
     window: &Rc<Window>,
     account: &Rc<AccountInfo>,
@@ -487,52 +483,19 @@ fn contact_group(
     }
     group.add(&name);
 
-    let (presence, status_text, subscription) = match &d.contact {
-        Some(c) => (
-            text(c, "presence"),
-            text(c, "status"),
-            text(c, "subscription"),
-        ),
-        None => (String::new(), String::new(), "none".to_owned()),
-    };
-    let shown = match presence.as_str() {
-        "available" | "chat" => "Available",
-        "away" | "xa" => "Away",
-        "dnd" => "Do Not Disturb",
-        _ if matches!(subscription.as_str(), "to" | "both") => "Offline",
-        _ => "Unknown: they don’t share their status with you",
-    };
-    let status = adw::ActionRow::builder()
-        .title("Status")
-        .subtitle(if status_text.is_empty() {
-            shown.to_owned()
-        } else {
-            format!("{shown} — {status_text}")
-        })
-        .build();
-    let dot = gtk::Box::builder()
-        .css_classes([
-            "status-dot",
-            match presence.as_str() {
-                "available" | "chat" => "available",
-                "away" | "xa" => "away",
-                "dnd" => "dnd",
-                _ => "offline",
-            },
-        ])
-        .valign(gtk::Align::Center)
-        .build();
-    status.add_prefix(&dot);
-    group.add(&status);
-
+    let subscription = d
+        .contact
+        .as_ref()
+        .map(|c| text(c, "subscription"))
+        .unwrap_or_else(|| "none".to_owned());
     let listed = adw::ActionRow::builder()
         .title("Contact List")
         .subtitle(match (d.contact.is_some(), subscription.as_str()) {
             (false, _) => "Not in your contacts",
-            (true, "both") => "You share your status with each other",
-            (true, "to") => "They share their status with you",
-            (true, "from") => "You share your status with them",
-            (true, _) => "In your contacts, not sharing status",
+            (true, "both") => "You see when each other is online",
+            (true, "to") => "You see when they’re online",
+            (true, "from") => "They see when you’re online",
+            (true, _) => "In your contacts",
         })
         .build();
     if d.contact.is_none() {
@@ -548,7 +511,7 @@ fn contact_group(
         );
         add.connect_clicked(move |b| {
             b.set_sensitive(false);
-            row.set_subtitle("Asked to share status");
+            row.set_subtitle("Asked to see each other online");
             let (roster, peer) = (roster.clone(), peer.clone());
             apply(&w, async move { roster.add_contact(&peer, "", &[]).await });
         });

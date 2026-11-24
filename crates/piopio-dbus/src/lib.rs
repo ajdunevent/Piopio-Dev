@@ -83,6 +83,8 @@ pub trait Daemon {
     #[zbus(property)]
     fn set_notification_sound(&self, value: &str) -> zbus::Result<()>;
     fn set_custom_sound(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
+    /// Plays the sound, through a test notification taken back shortly.
+    fn test_notification_sound(&self) -> zbus::Result<()>;
 
     /// Version of this interface.
     #[zbus(property)]
@@ -308,6 +310,8 @@ pub trait Conversation {
     #[zbus(property)]
     fn set_notification_sound(&self, value: &str) -> zbus::Result<()>;
     fn set_custom_sound(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
+    /// Plays the sound, through a test notification taken back shortly.
+    fn test_notification_sound(&self) -> zbus::Result<()>;
 
     /// Ring through Do Not Disturb and quiet modes.
     #[zbus(property)]

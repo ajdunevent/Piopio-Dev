@@ -1,6 +1,10 @@
-//! The conversation's encryption settings: whether to encrypt, our own
-//! fingerprint, and the contact's devices with their trust. A page of
-//! Conversation Details.
+//! Encryption: a conversation's page in Conversation Details (whether to
+//! encrypt, and the contact's devices with their trust), and the
+//! Encryption dialog from the main menu (this device's fingerprint and
+//! your other devices, for each account).
+//!
+//! Verifying a device: compare its fingerprint with the one the other
+//! device shows (in person or over a call), then switch it to trusted.
 
 use std::rc::Rc;
 
@@ -48,11 +52,7 @@ fn fingerprint_markup(fingerprint: &str) -> String {
 }
 
 /// The page, filled in as the devices load.
-pub fn page(
-    window: &Rc<Window>,
-    conversation: ConversationProxy<'static>,
-    own_jid: String,
-) -> adw::NavigationPage {
+pub fn page(window: &Rc<Window>, conversation: ConversationProxy<'static>) -> adw::NavigationPage {
     let page = adw::PreferencesPage::new();
     let view = adw::ToolbarView::builder()
         .top_bar_style(adw::ToolbarStyle::Raised)
@@ -66,20 +66,11 @@ pub fn page(
     settings.add(&wanted);
     page.add(&settings);
 
-    let own = adw::PreferencesGroup::builder()
-        .title("This Device")
-        .description("Contacts see this fingerprint for you")
-        .build();
-    page.add(&own);
     let theirs = adw::PreferencesGroup::builder()
         .title("Contact’s Devices")
-        .description("Compare fingerprints with your contact, in person or over a call, before marking them verified")
+        .description("To verify a device, compare its fingerprint with the one your contact’s app shows (in person or over a call), then switch it on")
         .build();
     page.add(&theirs);
-    let mine = adw::PreferencesGroup::builder()
-        .title("Your Other Devices")
-        .build();
-    page.add(&mine);
 
     let path = account_path(conversation.inner().path().as_str());
     let weak = Rc::downgrade(window);
@@ -95,11 +86,10 @@ pub fn page(
             let peer = conv.peer().await?;
             let wanted = conv.encryption_wanted().await?;
             let encryption = conv.encryption().await?;
-            let fingerprint = omemo.fingerprint().await?;
-            Ok::<_, zbus::Error>((omemo, peer, wanted, encryption, fingerprint))
+            Ok::<_, zbus::Error>((omemo, peer, wanted, encryption))
         })
         .await;
-        let (omemo, peer, is_wanted, encryption, fingerprint) = match loaded {
+        let (omemo, peer, is_wanted, encryption) = match loaded {
             Ok(v) => v,
             Err(e) => {
                 if let Some(w) = weak.upgrade() {
@@ -123,17 +113,76 @@ pub fn page(
             });
         });
 
-        own.add(
-            &adw::ActionRow::builder()
-                .title(fingerprint_markup(&fingerprint))
-                .css_classes(["fingerprint"])
-                .build(),
-        );
         theirs.set_title(&glib::markup_escape_text(&format!("{peer}’s Devices")));
         fill(&theirs, &omemo, &peer).await;
-        fill(&mine, &omemo, &own_jid).await;
     });
     navigation
+}
+
+/// The Encryption dialog: for each account, this device's fingerprint
+/// and the account's other devices with their trust.
+pub fn dialog(window: &Rc<Window>) {
+    // Sized up front: the devices arrive after it opens.
+    let dialog = adw::PreferencesDialog::builder()
+        .title("Encryption")
+        .search_enabled(false)
+        .content_height(560)
+        .build();
+    let page = adw::PreferencesPage::new();
+    dialog.add(&page);
+    let accounts = window.accounts.borrow().clone();
+    let several = accounts.len() > 1;
+    for account in accounts {
+        let own = adw::PreferencesGroup::builder()
+            .title(if several {
+                glib::markup_escape_text(&format!("This Device ({})", account.jid)).to_string()
+            } else {
+                "This Device".to_owned()
+            })
+            .description("Your contacts see this fingerprint for you; they can compare it with this one to verify it")
+            .build();
+        let mine = adw::PreferencesGroup::builder()
+            .title("Your Other Devices")
+            .description("To verify one, compare its fingerprint with the one it shows for itself, then switch it on")
+            .build();
+        page.add(&own);
+        page.add(&mine);
+        let (path, jid, w) = (
+            account.path.clone(),
+            account.jid.clone(),
+            Rc::downgrade(window),
+        );
+        glib::spawn_future_local(async move {
+            let Ok(bus) = client::bus().await else { return };
+            let loaded = run(async move {
+                let omemo = OmemoProxy::builder(&bus)
+                    .path(path)?
+                    .cache_properties(zbus::proxy::CacheProperties::No)
+                    .build()
+                    .await?;
+                let fingerprint = omemo.fingerprint().await?;
+                Ok::<_, zbus::Error>((omemo, fingerprint))
+            })
+            .await;
+            let (omemo, fingerprint) = match loaded {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(w) = w.upgrade() {
+                        w.toast(&client::explain(&e));
+                    }
+                    return;
+                }
+            };
+            own.add(
+                &adw::ActionRow::builder()
+                    .title(fingerprint_markup(&fingerprint))
+                    .css_classes(["fingerprint"])
+                    .build(),
+            );
+            fill(&mine, &omemo, &jid).await;
+        });
+    }
+    dialog.present(Some(&window.window));
 }
 
 /// Adds a row per device of `jid` to `group`, with a switch for trust.

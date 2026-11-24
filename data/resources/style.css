@@ -54,6 +54,8 @@ button.message-menu:hover { opacity: 1; }
 /* Send: the padlock inside the triangle. */
 .send-lock.closed { color: @accent_bg_color; }
 .send-lock.open { color: #c01c28; }
+.message-unencrypted { color: #c01c28; }
+.bubble.outgoing .message-unencrypted { color: #ffbebc; }
 .undecryptable { font-style: italic; opacity: 0.7; }
 .bubble .quote {
   border-left: 3px solid alpha(currentColor, 0.5);

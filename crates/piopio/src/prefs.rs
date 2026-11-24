@@ -27,6 +27,13 @@ impl SoundTarget {
         }
     }
 
+    async fn test(&self) -> zbus::Result<()> {
+        match self {
+            SoundTarget::App(p) => p.test_notification_sound().await,
+            SoundTarget::Conversation(p) => p.test_notification_sound().await,
+        }
+    }
+
     async fn set_custom(&self, file: std::fs::File) -> zbus::Result<()> {
         let fd = zbus::zvariant::Fd::from(&file);
         match self {
@@ -60,6 +67,27 @@ pub fn sound_row(
         .visible(index == 2)
         .build();
     row.add_suffix(&change);
+    // Hear it: a test notification with the sound, taken back shortly.
+    let play = gtk::Button::builder()
+        .icon_name("media-playback-start-symbolic")
+        .tooltip_text("Play Sound")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat", "circular"])
+        .build();
+    row.add_suffix(&play);
+    {
+        let (target, w) = (target.clone(), Rc::downgrade(window));
+        play.connect_clicked(move |_| {
+            let (target, w) = (target.clone(), w.clone());
+            glib::spawn_future_local(async move {
+                if let Err(e) = run(async move { target.test().await }).await
+                    && let Some(w) = w.upgrade()
+                {
+                    w.toast(&client::explain(&e));
+                }
+            });
+        });
+    }
     let previous = Rc::new(Cell::new(index));
 
     let pick = {

@@ -239,6 +239,21 @@ impl Daemon {
         Ok(())
     }
 
+    /// Plays the default notification sound (through a test notification
+    /// that is taken back after a few seconds).
+    async fn test_notification_sound(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let sound = crate::settings::get()
+            .map(|s| s.sound())
+            .unwrap_or_else(|| "default".into());
+        let file = (sound == "custom").then(|| crate::settings::sound_file("default"));
+        crate::notify::test(connection, &sound, file).await
+    }
+
     /// Plays this sound file (at most 2 MiB) for notifications by default.
     async fn set_custom_sound(
         &self,

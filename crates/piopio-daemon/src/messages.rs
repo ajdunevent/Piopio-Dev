@@ -1709,6 +1709,17 @@ impl ConversationObject {
         Ok(())
     }
 
+    /// Plays this conversation's notification sound (through a test
+    /// notification that is taken back after a few seconds).
+    async fn test_notification_sound(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        let (sound, file) = crate::notify::sound_of(&self.notification_style());
+        crate::notify::test(&self.session.bus, &sound, file).await
+    }
+
     /// Whether notifications ring through Do Not Disturb (GNOME) and the
     /// Quiet and Silent profiles (Phosh). Writable.
     #[zbus(property)]

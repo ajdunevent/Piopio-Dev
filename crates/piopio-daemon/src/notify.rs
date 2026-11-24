@@ -83,7 +83,7 @@ pub async fn message(session: &Session, conversation: &OwnedObjectPath, row: &Me
     );
     notification.insert("category", Value::from("im.received"));
     let (sound, file) = effective_sound(&style);
-    if portal_version(session).await >= 2 {
+    if portal_version(&session.bus).await >= 2 {
         match (sound.as_str(), &file) {
             ("custom", Some(path)) => {
                 if let Ok(fd) = sealed_copy(path) {
@@ -123,6 +123,70 @@ pub async fn withdraw(session: &Session, conversation: &OwnedObjectPath) {
         .await;
 }
 
+/// Plays a notification sound by showing a test notification with it and
+/// taking it back a few seconds later: `sound` is "default", "silent" or
+/// "custom" with its file. Sounds need portal version 2.
+pub async fn test(
+    bus: &zbus::Connection,
+    sound: &str,
+    file: Option<std::path::PathBuf>,
+) -> zbus::fdo::Result<()> {
+    if portal_version(bus).await < 2 {
+        return Err(zbus::fdo::Error::NotSupported(
+            "this desktop's notifications can't choose a sound".into(),
+        ));
+    }
+    let mut notification: HashMap<&str, Value<'_>> = HashMap::new();
+    notification.insert("title", Value::from("Notification Sound"));
+    notification.insert("body", Value::from("This is how new messages will sound."));
+    notification.insert("priority", Value::from("high"));
+    match (sound, file) {
+        ("custom", Some(path)) => {
+            let fd = sealed_copy(&path)
+                .map_err(|e| zbus::fdo::Error::Failed(format!("can't read the sound: {e}")))?;
+            notification.insert(
+                "sound",
+                Value::from(("file-descriptor", Value::from(zbus::zvariant::Fd::from(fd)))),
+            );
+        }
+        ("silent", _) => {
+            notification.insert("sound", Value::from("silent"));
+        }
+        _ => {
+            notification.insert("sound", Value::from("default"));
+        }
+    }
+    bus.call_method(
+        Some(PORTAL),
+        PORTAL_PATH,
+        Some(NOTIFICATION),
+        "AddNotification",
+        &("sound-test", notification),
+    )
+    .await
+    .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+    let bus = bus.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        let _ = bus
+            .call_method(
+                Some(PORTAL),
+                PORTAL_PATH,
+                Some(NOTIFICATION),
+                "RemoveNotification",
+                &("sound-test",),
+            )
+            .await;
+    });
+    Ok(())
+}
+
+/// The sound a conversation's notifications play: "default", "silent"
+/// or "custom", with the custom sound's file.
+pub fn sound_of(style: &Style) -> (String, Option<std::path::PathBuf>) {
+    effective_sound(style)
+}
+
 /// The sound to play ("default", "silent" or "custom") and its file.
 fn effective_sound(style: &Style) -> (String, Option<std::path::PathBuf>) {
     let own = match style.sound.as_str() {
@@ -148,12 +212,11 @@ fn effective_sound(style: &Style) -> (String, Option<std::path::PathBuf>) {
 }
 
 /// The Notification portal's version (sounds came with version 2).
-async fn portal_version(session: &Session) -> u32 {
+async fn portal_version(bus: &zbus::Connection) -> u32 {
     static VERSION: OnceCell<u32> = OnceCell::const_new();
     *VERSION
         .get_or_init(|| async {
-            let Ok(proxy) = zbus::Proxy::new(&session.bus, PORTAL, PORTAL_PATH, NOTIFICATION).await
-            else {
+            let Ok(proxy) = zbus::Proxy::new(bus, PORTAL, PORTAL_PATH, NOTIFICATION).await else {
                 return 1;
             };
             proxy.get_property::<u32>("version").await.unwrap_or(1)

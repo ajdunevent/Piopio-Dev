@@ -55,12 +55,11 @@ pub struct ChatPage {
     /// What the peer's apps support; empty while unknown.
     peer_features: RefCell<Vec<String>>,
     attach: gtk::Button,
-    video_call: RefCell<Option<gtk::Button>>,
     /// Who is in a group chat, and leaving or rejoining it.
     people: gtk::MenuButton,
     is_room: Cell<bool>,
     /// The call button (hidden in group chats).
-    call_button: RefCell<Option<gtk::Button>>,
+    call_button: RefCell<Option<gtk::MenuButton>>,
     /// Who we are here: our JID, or room@service/nick in a group chat.
     me: RefCell<String>,
     messages: gtk::Box,
@@ -109,19 +108,14 @@ impl ChatPage {
             .menu_model(&menu)
             .build();
         header.pack_end(&more);
-        // Shown once the peer's apps are known to take calls.
-        let call = gtk::Button::builder()
+        // A Call menu (voice, video), shown once the peer's apps are known
+        // to take calls; it offers only the kinds they support.
+        let call = gtk::MenuButton::builder()
             .icon_name("call-start-symbolic")
             .tooltip_text("Call")
             .visible(false)
             .build();
-        let video_call = gtk::Button::builder()
-            .icon_name("camera-video-symbolic")
-            .tooltip_text("Video Call")
-            .visible(false)
-            .build();
         header.pack_end(&call);
-        header.pack_end(&video_call);
         header.pack_end(&people);
 
         // A plain box, as in Sanctum's Assist: a ListBox laid its rows out
@@ -142,6 +136,12 @@ impl ChatPage {
             .vexpand(true)
             .child(&clamp)
             .build();
+        // The history at its natural height: at its minimum, pictures
+        // (which may shrink) got smaller as the box to write in grew,
+        // instead of the history scrolling.
+        if let Some(viewport) = scroller.child().and_downcast::<gtk::Viewport>() {
+            viewport.set_vscroll_policy(gtk::ScrollablePolicy::Natural);
+        }
 
         let mode_label = gtk::Label::builder()
             .hexpand(true)
@@ -171,14 +171,16 @@ impl ChatPage {
         // not.
         let triangle = gtk::Image::builder()
             .icon_name("send-triangle-symbolic")
-            .pixel_size(26)
+            .pixel_size(34)
             .build();
         let send_lock = gtk::Image::builder()
             .icon_name("changes-allow-symbolic")
             .pixel_size(11)
             .halign(gtk::Align::Start)
             .valign(gtk::Align::Center)
-            .margin_start(5)
+            // Centred on the triangle's widest inner circle, with room
+            // around it.
+            .margin_start(8)
             .css_classes(["send-lock", "open"])
             .build();
         let send_icon = gtk::Overlay::builder()
@@ -260,7 +262,6 @@ impl ChatPage {
             decorations: RefCell::default(),
             peer_features: RefCell::default(),
             attach: attach.clone(),
-            video_call: RefCell::default(),
             people,
             is_room: Cell::new(false),
             me: RefCell::new(me),
@@ -369,30 +370,19 @@ impl ChatPage {
         });
 
         this.install_actions();
-        let weak = Rc::downgrade(&this);
-        call.connect_clicked(move |b| {
-            if let Some(this) = weak.upgrade() {
-                b.set_sensitive(false);
-                let b = b.clone();
-                glib::spawn_future_local(async move {
-                    this.start_call(false).await;
-                    b.set_sensitive(true);
-                });
-            }
-        });
-        let weak = Rc::downgrade(&this);
-        video_call.connect_clicked(move |b| {
-            if let Some(this) = weak.upgrade() {
-                b.set_sensitive(false);
-                let b = b.clone();
-                glib::spawn_future_local(async move {
-                    this.start_call(true).await;
-                    b.set_sensitive(true);
-                });
-            }
-        });
+        let calls = gtk::gio::SimpleActionGroup::new();
+        for (name, video) in [("voice", false), ("video", true)] {
+            let action = gtk::gio::SimpleAction::new(name, None);
+            let weak = Rc::downgrade(&this);
+            action.connect_activate(move |_, _| {
+                if let Some(this) = weak.upgrade() {
+                    glib::spawn_future_local(async move { this.start_call(video).await });
+                }
+            });
+            calls.add_action(&action);
+        }
+        this.page.insert_action_group("call", Some(&calls));
         this.call_button.replace(Some(call));
-        this.video_call.replace(Some(video_call));
 
         // Load older messages when scrolled to the top.
         let weak = Rc::downgrade(&this);
@@ -722,11 +712,18 @@ impl ChatPage {
                 let Some(this) = weak.upgrade() else { break };
                 let has = |f: &str| features.iter().any(|x| x == f);
                 let rings = has("urn:xmpp:jingle-message:0") && has("urn:xmpp:jingle:1");
+                let voice = rings && has("urn:xmpp:jingle:apps:rtp:audio");
+                let video = rings && has("urn:xmpp:jingle:apps:rtp:video");
                 if let Some(b) = this.call_button.borrow().as_ref() {
-                    b.set_visible(rings && has("urn:xmpp:jingle:apps:rtp:audio"));
-                }
-                if let Some(b) = this.video_call.borrow().as_ref() {
-                    b.set_visible(rings && has("urn:xmpp:jingle:apps:rtp:video"));
+                    let menu = gtk::gio::Menu::new();
+                    if voice {
+                        menu.append(Some("_Voice Call"), Some("call.voice"));
+                    }
+                    if video {
+                        menu.append(Some("V_ideo Call"), Some("call.video"));
+                    }
+                    b.set_menu_model(Some(&menu));
+                    b.set_visible(voice || video);
                 }
                 *this.peer_features.borrow_mut() = features;
             }
@@ -794,10 +791,6 @@ impl ChatPage {
 
     pub fn proxy(&self) -> &ConversationProxy<'static> {
         &self.proxy
-    }
-
-    pub fn own_jid(&self) -> &str {
-        &self.own_jid
     }
 
     pub fn account_path(&self) -> &str {
@@ -1275,6 +1268,18 @@ impl ChatPage {
                     .build(),
             );
         }
+        // Not encrypted: an open red padlock on the outer side of the time.
+        let unencrypted = (encryption == "none" && !retracted).then(|| {
+            gtk::Image::builder()
+                .icon_name("changes-allow-symbolic")
+                .tooltip_text("Not encrypted")
+                .pixel_size(12)
+                .css_classes(["message-unencrypted"])
+                .build()
+        });
+        if !outgoing && let Some(lock) = &unencrypted {
+            meta.append(lock);
+        }
         meta.append(
             &gtk::Label::builder()
                 .label(time_of(m))
@@ -1299,6 +1304,9 @@ impl ChatPage {
                         .css_classes(["message-state"])
                         .build(),
                 );
+            }
+            if let Some(lock) = &unencrypted {
+                meta.append(lock);
             }
         }
         bubble.append(&meta);

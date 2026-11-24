@@ -108,6 +108,7 @@ impl Window {
         let main = gtk::gio::Menu::new();
         main.append(Some("_Preferences"), Some("app.preferences"));
         main.append(Some("_Accounts"), Some("app.accounts"));
+        main.append(Some("_Encryption"), Some("app.encryption"));
         main.append(Some("_About Piopio"), Some("app.about"));
         menu.append_section(None, &main);
         let quit = gtk::gio::Menu::new();
