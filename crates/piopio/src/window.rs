@@ -3,7 +3,7 @@
 //! On narrow screens the split view collapses into one page at a time, so the
 //! same window works on a phone.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -45,12 +45,20 @@ pub struct AccountInfo {
     pub roster: RosterProxy<'static>,
 }
 
+/// How long a connection problem lasts before the banner shows it.
+const BANNER_DELAY: std::time::Duration = std::time::Duration::from_secs(4);
+
 pub struct Window {
     pub window: adw::ApplicationWindow,
     split: adw::NavigationSplitView,
     list: gtk::ListBox,
     sidebar_stack: gtk::Stack,
     banner: adw::Banner,
+    /// Bumped on every banner check, so a delayed reveal can tell it
+    /// has been overtaken.
+    banner_check: Cell<u64>,
+    /// A delayed reveal is already counting down.
+    banner_waiting: Cell<bool>,
     toasts: adw::ToastOverlay,
     entries: RefCell<HashMap<String, Entry>>,
     pub accounts: RefCell<Vec<Rc<AccountInfo>>>,
@@ -190,6 +198,8 @@ impl Window {
             list,
             sidebar_stack,
             banner,
+            banner_check: Cell::new(0),
+            banner_waiting: Cell::new(false),
             toasts,
             entries: RefCell::new(HashMap::new()),
             accounts: RefCell::new(Vec::new()),
@@ -430,7 +440,49 @@ impl Window {
         self.update_sidebar();
     }
 
-    async fn update_banner(&self) {
+    /// Connection problems show only once they've lasted a few seconds:
+    /// logging in on start-up, or a quick reconnect, would otherwise
+    /// flash a banner too briefly to read and bounce the list.
+    async fn update_banner(self: &Rc<Self>) {
+        let check = self.banner_check.get() + 1;
+        self.banner_check.set(check);
+        let problems = self.connection_problems().await;
+        if self.banner_check.get() != check {
+            return;
+        }
+        if problems.is_empty() {
+            self.banner.set_revealed(false);
+            return;
+        }
+        if self.banner.is_revealed() {
+            self.show_problems(&problems);
+            return;
+        }
+        if self.banner_waiting.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_local_once(BANNER_DELAY, move || {
+            let Some(this) = weak.upgrade() else { return };
+            this.banner_waiting.set(false);
+            glib::spawn_future_local(async move {
+                let check = this.banner_check.get() + 1;
+                this.banner_check.set(check);
+                let problems = this.connection_problems().await;
+                if this.banner_check.get() == check && !problems.is_empty() {
+                    this.show_problems(&problems);
+                }
+            });
+        });
+    }
+
+    fn show_problems(&self, problems: &[String]) {
+        self.banner
+            .set_title(&glib::markup_escape_text(&problems.join("\n")));
+        self.banner.set_revealed(true);
+    }
+
+    async fn connection_problems(&self) -> Vec<String> {
         let accounts: Vec<Rc<AccountInfo>> = self.accounts.borrow().clone();
         let mut problems = Vec::new();
         for account in accounts {
@@ -454,13 +506,7 @@ impl Window {
                 (true, _, _) => problems.push(format!("Connecting {}…", account.jid)),
             }
         }
-        if problems.is_empty() {
-            self.banner.set_revealed(false);
-        } else {
-            self.banner
-                .set_title(&glib::markup_escape_text(&problems.join("\n")));
-            self.banner.set_revealed(true);
-        }
+        problems
     }
 
     fn watch_objects(self: &Rc<Self>, bus: zbus::Connection) {
