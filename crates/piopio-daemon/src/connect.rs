@@ -6,17 +6,25 @@
 //! library, decides what happens on failure: an authentication failure stops
 //! retrying and is reported to the UI instead of looping forever.
 
+use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::Duration;
 
+use sasl::common::ChannelBinding;
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncWrite, BufStream};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio_xmpp::connect::{
-    DirectTlsServerConnector, DnsConfig, ServerConnector, StartTlsServerConnector,
-    TcpServerConnector,
-};
+use tokio_xmpp::connect::starttls::starttls;
+use tokio_xmpp::connect::tls_common::establish_tls_connection;
+use tokio_xmpp::connect::{DnsConfig, ServerConnector};
 use tokio_xmpp::jid::{BareJid, Jid};
+use tokio_xmpp::parsers::stream_features::StreamFeatures;
 use tokio_xmpp::stanzastream::Connection;
-use tokio_xmpp::xmlstream::Timeouts;
+use tokio_xmpp::xmlstream::{
+    PendingFeaturesRecv, StreamHeader, Timeouts, XmppStream, initiate_stream,
+};
+
+use crate::csi::{Csi, CsiIo};
 
 use crate::login::authenticate;
 
@@ -54,14 +62,16 @@ pub fn connector(
     server: Server,
     status: mpsc::UnboundedSender<Status>,
     cancel: watch::Receiver<bool>,
+    csi: Arc<Csi>,
 ) -> Connector {
     Box::new(move |_preferred_location, mut slot| {
-        let (jid, password, server, status, mut cancel) = (
+        let (jid, password, server, status, mut cancel, csi) = (
             jid.clone(),
             password.clone(),
             server.clone(),
             status.clone(),
             cancel.clone(),
+            csi.clone(),
         );
         tokio::spawn(async move {
             const MAX_DELAY: Duration = Duration::from_secs(60);
@@ -72,7 +82,7 @@ pub fn connector(
                 let attempt = tokio::select! {
                     _ = cancelled(&mut cancel) => return park(slot).await,
                     _ = slot.closed() => return,
-                    attempt = attempt(&server, &full, &password) => attempt,
+                    attempt = attempt(&server, &full, &password, &csi) => attempt,
                 };
                 let wait = match attempt {
                     Ok(connection) => {
@@ -107,7 +117,13 @@ async fn attempt(
     server: &Server,
     jid: &Jid,
     password: &str,
+    csi: &Arc<Csi>,
 ) -> Result<Connection, tokio_xmpp::Error> {
+    let via = |how, dns| Via {
+        how,
+        dns,
+        csi: csi.clone(),
+    };
     match server {
         Server::Srv => {
             let domain = jid.domain().as_str();
@@ -116,7 +132,7 @@ async fn attempt(
             // Anything but a refused login falls back to STARTTLS.
             if offers_direct_tls(domain).await {
                 match login(
-                    DirectTlsServerConnector::from(DnsConfig::srv_xmpps(domain)),
+                    via(How::DirectTls, DnsConfig::srv_xmpps(domain)),
                     jid,
                     password,
                 )
@@ -130,16 +146,88 @@ async fn attempt(
                 }
             }
             let dns = DnsConfig::srv_default_client(domain);
-            login(StartTlsServerConnector::from(dns), jid, password).await
+            login(via(How::StartTls, dns), jid, password).await
         }
         Server::Host { host, port } => {
             let dns = DnsConfig::no_srv(host, *port);
-            login(StartTlsServerConnector::from(dns), jid, password).await
+            login(via(How::StartTls, dns), jid, password).await
         }
         Server::TestPlaintext { address } => {
             let dns = DnsConfig::addr(address);
-            login(TcpServerConnector::from(dns), jid, password).await
+            login(via(How::Plain, dns), jid, password).await
         }
+    }
+}
+
+/// The connection's plaintext, whatever is under it.
+trait RawIo: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> RawIo for T {}
+
+#[derive(Clone, Copy, Debug)]
+enum How {
+    /// Only for the test suite.
+    Plain,
+    StartTls,
+    DirectTls,
+}
+
+/// tokio-xmpp's three connectors in one, with the plaintext (above TLS)
+/// passed through [`CsiIo`] so the daemon can write CSI nonzas.
+#[derive(Clone, Debug)]
+struct Via {
+    how: How,
+    dns: DnsConfig,
+    csi: Arc<Csi>,
+}
+
+impl ServerConnector for Via {
+    type Stream = BufStream<CsiIo<Box<dyn RawIo>>>;
+
+    async fn connect(
+        &self,
+        jid: &Jid,
+        ns: &'static str,
+        timeouts: Timeouts,
+    ) -> Result<(PendingFeaturesRecv<Self::Stream>, ChannelBinding), tokio_xmpp::Error> {
+        let domain = jid.domain().as_str();
+        fn header<'a>(domain: &'a str, from: Option<Cow<'a, str>>) -> StreamHeader<'a> {
+            StreamHeader {
+                to: Some(Cow::Borrowed(domain)),
+                from,
+                id: None,
+            }
+        }
+        let tcp = self.dns.resolve().await?;
+        let (io, binding): (Box<dyn RawIo>, ChannelBinding) = match self.how {
+            How::Plain => (Box::new(tcp), ChannelBinding::None),
+            How::DirectTls => {
+                let (tls, binding) = establish_tls_connection(tcp, domain).await?;
+                (Box::new(tls), binding)
+            }
+            How::StartTls => {
+                let plain =
+                    initiate_stream(BufStream::new(tcp), ns, header(domain, None), timeouts)
+                        .await?;
+                let (features, plain): (StreamFeatures, XmppStream<BufStream<_>>) =
+                    plain.recv_features().await?;
+                if !features.can_starttls() {
+                    return Err(tokio_xmpp::Error::Protocol(
+                        tokio_xmpp::error::ProtocolError::NoTls,
+                    ));
+                }
+                let (tls, binding) = starttls(plain, domain).await?;
+                (Box::new(tls), binding)
+            }
+        };
+        // Direct TLS names us in the header, as tokio-xmpp's connector does
+        // (servers want it to offer SASL2).
+        let from =
+            matches!(self.how, How::DirectTls).then(|| Cow::Owned(jid.to_bare().to_string()));
+        let stream = BufStream::new(self.csi.wrap(io));
+        Ok((
+            initiate_stream(stream, ns, header(domain, from), timeouts).await?,
+            binding,
+        ))
     }
 }
 

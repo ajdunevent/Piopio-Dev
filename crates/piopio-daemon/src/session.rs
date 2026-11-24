@@ -83,6 +83,8 @@ pub struct Shared {
     pub calls: crate::jingle::Calls,
     pub blocked: crate::blocking::Blocklist,
     pub features: crate::features::Features,
+    /// Client State Indication: whether the server is told a window is open.
+    pub csi: Arc<crate::csi::Csi>,
     /// The account's defaults: whether contacts see that we're typing, and
     /// that we've read their messages.
     pub send_chat_states: AtomicBool,
@@ -160,6 +162,7 @@ pub fn new_shared(
         calls: crate::jingle::Calls::default(),
         blocked: crate::blocking::Blocklist::default(),
         features: crate::features::Features::default(),
+        csi: crate::csi::Csi::new(crate::activity::ui_present()),
         send_chat_states: AtomicBool::new(true),
         send_receipts: AtomicBool::new(true),
     })
@@ -221,7 +224,26 @@ async fn run(
 ) {
     let (status_tx, mut status_rx) = mpsc::unbounded_channel();
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let connector = connector(shared.jid.clone(), password, server, status_tx, cancel_rx);
+    let connector = connector(
+        shared.jid.clone(),
+        password,
+        server,
+        status_tx,
+        cancel_rx,
+        shared.csi.clone(),
+    );
+    // Opening or closing the window is passed on to the server (CSI).
+    let window_watch = crate::activity::subscribe().map(|mut window| {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            while window.changed().await.is_ok() {
+                let open = *window.borrow_and_update();
+                if shared.csi.set_active(open) && *shared.online.borrow() {
+                    push_csi(&shared);
+                }
+            }
+        })
+    });
     let mut stream = StanzaStream::new(connector, 16);
     set_state(&iface, State::Connecting, Some(String::new())).await;
 
@@ -285,6 +307,12 @@ async fn run(
                     shared.rooms.new_session().await;
                     set_state(&iface, State::Connected, Some(String::new())).await;
                     shared.online.send_replace(true);
+                    let csi = features
+                        .others
+                        .iter()
+                        .any(|e| e.is("csi", crate::csi::NS));
+                    shared.csi.bound(Some(csi));
+                    push_csi(&shared);
                     tokio::spawn(came_online(shared.clone(), features));
                 }
                 Some(Event::Stream(StreamEvent::Resumed)) => {
@@ -292,6 +320,8 @@ async fn run(
                     connected = true;
                     set_state(&iface, State::Connected, Some(String::new())).await;
                     shared.online.send_replace(true);
+                    shared.csi.bound(None);
+                    push_csi(&shared);
                 }
                 Some(Event::Stream(StreamEvent::Suspended)) => {
                     tracing::info!(jid = %shared.jid, "connection lost, reconnecting");
@@ -323,6 +353,9 @@ async fn run(
     }
 
     *shared.commands.lock().expect("lock") = None;
+    if let Some(task) = window_watch {
+        task.abort();
+    }
     drop(incoming_tx);
     let _ = tokio::time::timeout(Duration::from_secs(2), dispatcher).await;
     shared.online.send_replace(false);
@@ -341,6 +374,20 @@ async fn run(
 }
 
 /// Runs after every login that lost state (not after a resumption).
+/// When the server hasn't been told the window's state, sends a ping so
+/// the connection writes it (CSI goes in just before the next stanza).
+fn push_csi(shared: &Session) {
+    if !shared.csi.pending() {
+        return;
+    }
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let server = Jid::from(BareJid::from_parts(None, shared.jid.domain()));
+        let ping = Iq::from_get("", tokio_xmpp::parsers::ping::Ping).with_to(server);
+        let _ = shared.iq(ping).await;
+    });
+}
+
 async fn came_online(shared: Session, features: StreamFeatures) {
     shared.caught_up.store(false, Ordering::SeqCst);
     shared.uploads.forget().await;

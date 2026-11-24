@@ -3,11 +3,8 @@
 //! The UI owns the bus name `net.dunevent.Piopio` (its GApplication ID) for
 //! exactly as long as its window exists, so the daemon watches that name
 //! instead of asking the UI to report in. With no window, new messages produce
-//! desktop notifications.
-//!
-//! Telling servers we are inactive (XEP-0352) belongs here too, but CSI is a
-//! nonza and tokio-xmpp 6's `StanzaStream` can only send stanzas; it follows
-//! once the library can.
+//! desktop notifications, and servers are told we're inactive (XEP-0352,
+//! see `csi`).
 
 use std::sync::OnceLock;
 

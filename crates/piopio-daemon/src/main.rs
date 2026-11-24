@@ -10,6 +10,7 @@ mod avatars;
 mod background;
 mod blocking;
 mod connect;
+mod csi;
 mod daemon;
 mod disco;
 mod features;
