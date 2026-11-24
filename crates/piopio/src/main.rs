@@ -101,7 +101,6 @@ fn main() -> glib::ExitCode {
         ("join-room", 4),
         ("preferences", 5),
         ("quit-fully", 6),
-        ("encryption", 7),
     ] {
         let ensure = ensure.clone();
         action(
@@ -116,7 +115,6 @@ fn main() -> glib::ExitCode {
                     4 => dialogs::join_room(&w),
                     5 => crate::prefs::show(&w),
                     6 => dialogs::quit_fully(&w),
-                    7 => crate::encryption::dialog(&w),
                     _ => dialogs::about(&w),
                 }
             }),

@@ -465,7 +465,11 @@ pub fn accounts(window: &Rc<Window>) {
         .build();
     let page = adw::PreferencesPage::new();
     page.add(&group);
-    let dialog = adw::PreferencesDialog::builder().title("Accounts").build();
+    let dialog = adw::PreferencesDialog::builder()
+        .title("Accounts")
+        // Room for an account's Encryption page, whose devices arrive later.
+        .content_height(520)
+        .build();
     dialog.add(&page);
 
     for account in window.accounts.borrow().iter().cloned() {
@@ -482,7 +486,23 @@ pub fn accounts(window: &Rc<Window>) {
             .valign(gtk::Align::Center)
             .css_classes(["flat"])
             .build();
+        // Each account has its own keys, so its Encryption page is here.
+        let keys = gtk::Button::builder()
+            .icon_name("channel-secure-symbolic")
+            .tooltip_text("Encryption")
+            .valign(gtk::Align::Center)
+            .css_classes(["flat"])
+            .build();
+        {
+            let (w, dialog, account) = (Rc::downgrade(window), dialog.clone(), account.clone());
+            keys.connect_clicked(move |_| {
+                if let Some(w) = w.upgrade() {
+                    dialog.push_subpage(&crate::encryption::account_page(&w, &account));
+                }
+            });
+        }
         row.add_suffix(&enabled);
+        row.add_suffix(&keys);
         row.add_suffix(&remove);
         group.add(&row);
 

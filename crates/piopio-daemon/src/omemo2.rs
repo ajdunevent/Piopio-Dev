@@ -379,7 +379,9 @@ async fn learn_identity(
         None if devices
             .iter()
             .chain(legacy.iter())
-            .any(|d| d.trust == trust::VERIFIED) =>
+            // A record without a key (trust set before it arrived)
+            // doesn't vouch for anything.
+            .any(|d| !d.identity.is_empty() && d.trust == trust::VERIFIED) =>
         {
             trust::UNDECIDED.to_owned()
         }

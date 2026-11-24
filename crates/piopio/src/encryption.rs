@@ -1,7 +1,7 @@
 //! Encryption: a conversation's page in Conversation Details (whether to
-//! encrypt, and the contact's devices with their trust), and the
-//! Encryption dialog from the main menu (this device's fingerprint and
-//! your other devices, for each account).
+//! encrypt, and the contact's devices with their trust), and each
+//! account's Encryption page in Accounts (this device's fingerprint and
+//! your other devices).
 //!
 //! Verifying a device: compare its fingerprint with the one the other
 //! device shows (in person or over a call), then switch it to trusted.
@@ -13,7 +13,7 @@ use adw::{glib, gtk};
 use piopio_dbus::{ConversationProxy, Dict, OmemoProxy};
 
 use crate::client::{self, run};
-use crate::window::Window;
+use crate::window::{AccountInfo, Window};
 
 fn text(dict: &Dict, key: &str) -> String {
     dict.get(key)
@@ -41,14 +41,16 @@ fn trust_text(trust: &str, active: bool) -> &'static str {
 
 /// A fingerprint in two lines, as people compare them.
 fn fingerprint_markup(fingerprint: &str) -> String {
+    let groups = fingerprint.split(' ').count();
+    fingerprint_lines(fingerprint, groups.div_ceil(2).max(1))
+}
+
+/// A fingerprint with `per_line` groups on each line: two keeps it narrow
+/// enough for a phone.
+fn fingerprint_lines(fingerprint: &str, per_line: usize) -> String {
     let groups: Vec<&str> = fingerprint.split(' ').collect();
-    let half = groups.len().div_ceil(2);
-    glib::markup_escape_text(&format!(
-        "{}\n{}",
-        groups[..half].join(" "),
-        groups[half..].join(" ")
-    ))
-    .to_string()
+    let lines: Vec<String> = groups.chunks(per_line).map(|c| c.join(" ")).collect();
+    glib::markup_escape_text(&lines.join("\n")).to_string()
 }
 
 /// The page, filled in as the devices load.
@@ -114,83 +116,77 @@ pub fn page(window: &Rc<Window>, conversation: ConversationProxy<'static>) -> ad
         });
 
         theirs.set_title(&glib::markup_escape_text(&format!("{peer}’s Devices")));
-        fill(&theirs, &omemo, &peer).await;
+        fill(&theirs, &omemo, &peer, false).await;
     });
     navigation
 }
 
-/// The Encryption dialog: for each account, this device's fingerprint
-/// and the account's other devices with their trust.
-pub fn dialog(window: &Rc<Window>) {
-    // Sized up front: the devices arrive after it opens.
-    let dialog = adw::PreferencesDialog::builder()
-        .title("Encryption")
-        .search_enabled(false)
-        .content_height(560)
-        .build();
+/// An account's Encryption page, opened from its row in Accounts: this
+/// device's fingerprint and the account's other devices. Each account has
+/// its own keys.
+pub fn account_page(window: &Rc<Window>, account: &AccountInfo) -> adw::NavigationPage {
     let page = adw::PreferencesPage::new();
-    dialog.add(&page);
-    let accounts = window.accounts.borrow().clone();
-    let several = accounts.len() > 1;
-    for account in accounts {
-        let own = adw::PreferencesGroup::builder()
-            .title(if several {
-                glib::markup_escape_text(&format!("This Device ({})", account.jid)).to_string()
-            } else {
-                "This Device".to_owned()
-            })
-            .description("Your contacts see this fingerprint for you; they can compare it with this one to verify it")
-            .build();
-        let mine = adw::PreferencesGroup::builder()
-            .title("Your Other Devices")
-            .description("To verify one, choose Verify… and compare the fingerprint with the one that device shows for itself")
-            .build();
-        page.add(&own);
-        page.add(&mine);
-        let (path, jid, w) = (
-            account.path.clone(),
-            account.jid.clone(),
-            Rc::downgrade(window),
-        );
-        glib::spawn_future_local(async move {
-            let Ok(bus) = client::bus().await else { return };
-            let loaded = run(async move {
-                let omemo = OmemoProxy::builder(&bus)
-                    .path(path)?
-                    .cache_properties(zbus::proxy::CacheProperties::No)
-                    .build()
-                    .await?;
-                let fingerprint = omemo.fingerprint().await?;
-                Ok::<_, zbus::Error>((omemo, fingerprint))
-            })
-            .await;
-            let (omemo, fingerprint) = match loaded {
-                Ok(v) => v,
-                Err(e) => {
-                    if let Some(w) = w.upgrade() {
-                        w.toast(&client::explain(&e));
-                    }
-                    return;
+    let own = adw::PreferencesGroup::builder()
+        .title("This Device")
+        .description("Your contacts see this fingerprint for you; they can compare it with this one to verify it")
+        .build();
+    let mine = adw::PreferencesGroup::builder()
+        .title("Your Other Devices")
+        .description("To verify one, choose Verify… and compare the fingerprint with the one that device shows for itself")
+        .build();
+    page.add(&own);
+    page.add(&mine);
+    let view = adw::ToolbarView::new();
+    view.add_top_bar(&adw::HeaderBar::new());
+    view.set_content(Some(&page));
+    let nav = adw::NavigationPage::builder()
+        .title("Encryption")
+        .child(&view)
+        .build();
+    let (path, jid, w) = (
+        account.path.clone(),
+        account.jid.clone(),
+        Rc::downgrade(window),
+    );
+    glib::spawn_future_local(async move {
+        let Ok(bus) = client::bus().await else { return };
+        let loaded = run(async move {
+            let omemo = OmemoProxy::builder(&bus)
+                .path(path)?
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .build()
+                .await?;
+            let fingerprint = omemo.fingerprint().await?;
+            Ok::<_, zbus::Error>((omemo, fingerprint))
+        })
+        .await;
+        let (omemo, fingerprint) = match loaded {
+            Ok(v) => v,
+            Err(e) => {
+                if let Some(w) = w.upgrade() {
+                    w.toast(&client::explain(&e));
                 }
-            };
-            own.add(
-                &adw::ActionRow::builder()
-                    .title(fingerprint_markup(&fingerprint))
-                    .css_classes(["fingerprint"])
-                    .build(),
-            );
-            fill(&mine, &omemo, &jid).await;
-        });
-    }
-    dialog.present(Some(&window.window));
+                return;
+            }
+        };
+        own.add(
+            &adw::ActionRow::builder()
+                .title(fingerprint_markup(&fingerprint))
+                .css_classes(["fingerprint"])
+                .build(),
+        );
+        fill(&mine, &omemo, &jid, true).await;
+    });
+    nav
 }
 
 /// Lists `jid`'s devices in `group`, each with Verify… and a menu to
 /// trust it without verifying or not trust it, and keeps the list current
 /// (a device's key arrives, or its trust changes).
-async fn fill(group: &adw::PreferencesGroup, omemo: &OmemoProxy<'static>, jid: &str) {
+/// `yours`: the devices are the account's own.
+async fn fill(group: &adw::PreferencesGroup, omemo: &OmemoProxy<'static>, jid: &str, yours: bool) {
     let rows: Rc<std::cell::RefCell<Vec<adw::ActionRow>>> = Rc::default();
-    refill(group, omemo, jid, &rows).await;
+    refill(group, omemo, jid, yours, &rows).await;
     let changes = {
         let omemo = omemo.clone();
         client::forward(move || async move { omemo.receive_devices_changed().await.ok() })
@@ -200,7 +196,7 @@ async fn fill(group: &adw::PreferencesGroup, omemo: &OmemoProxy<'static>, jid: &
         while let Ok(signal) = changes.recv().await {
             let Some(group) = group.upgrade() else { break };
             if signal.args().is_ok_and(|a| a.jid() == &jid) {
-                refill(&group, &omemo, &jid, &rows).await;
+                refill(&group, &omemo, &jid, yours, &rows).await;
             }
         }
     });
@@ -210,6 +206,7 @@ async fn refill(
     group: &adw::PreferencesGroup,
     omemo: &OmemoProxy<'static>,
     jid: &str,
+    yours: bool,
     rows: &Rc<std::cell::RefCell<Vec<adw::ActionRow>>>,
 ) {
     let (o, j) = (omemo.clone(), jid.to_owned());
@@ -221,7 +218,11 @@ async fn refill(
     }
     if devices.is_empty() {
         let row = adw::ActionRow::builder()
-            .title("No devices with OMEMO")
+            .title(if yours {
+                "No other devices"
+            } else {
+                "No devices with OMEMO"
+            })
             .css_classes(["dim-label"])
             .build();
         group.add(&row);
@@ -229,7 +230,7 @@ async fn refill(
         return;
     }
     for d in devices {
-        let row = device_row(group, omemo, jid, &d);
+        let row = device_row(group, omemo, jid, yours, &d);
         group.add(&row);
         rows.borrow_mut().push(row);
     }
@@ -239,6 +240,7 @@ fn device_row(
     group: &adw::PreferencesGroup,
     omemo: &OmemoProxy<'static>,
     jid: &str,
+    yours: bool,
     d: &Dict,
 ) -> adw::ActionRow {
     let id = d
@@ -269,7 +271,7 @@ fn device_row(
         .css_classes(["fingerprint"])
         .build();
     let icon = match trust.as_str() {
-        "verified" => "emblem-ok-symbolic",
+        "verified" => "device-verified-symbolic",
         "blind" => "channel-secure-symbolic",
         _ => "dialog-warning-symbolic",
     };
@@ -302,7 +304,7 @@ fn device_row(
                 let own = run(async move { o.fingerprint().await })
                     .await
                     .unwrap_or_default();
-                verify_dialog(&group, &fp, &own, set);
+                verify_dialog(&group, &fp, &own, yours, set);
             });
         });
         row.add_suffix(&verify);
@@ -353,6 +355,7 @@ fn verify_dialog(
     parent: &impl IsA<gtk::Widget>,
     theirs: &str,
     own: &str,
+    yours: bool,
     set: impl Fn(&'static str) + 'static,
 ) {
     let body = gtk::Box::builder()
@@ -361,7 +364,7 @@ fn verify_dialog(
         .build();
     body.append(
         &gtk::Label::builder()
-            .label(fingerprint_markup(theirs))
+            .label(fingerprint_lines(theirs, 2))
             .use_markup(true)
             .justify(gtk::Justification::Center)
             .selectable(true)
@@ -373,8 +376,13 @@ fn verify_dialog(
         body.append(
             &gtk::Label::builder()
                 .label(format!(
-                    "This device’s fingerprint, for them to check:\n{}",
-                    fingerprint_markup(own)
+                    "{}\n{}",
+                    if yours {
+                        "This device’s fingerprint, to check from that one:"
+                    } else {
+                        "Your fingerprint, for them to check:"
+                    },
+                    fingerprint_lines(own, 2)
                 ))
                 .use_markup(true)
                 .justify(gtk::Justification::Center)
@@ -383,12 +391,18 @@ fn verify_dialog(
                 .build(),
         );
     }
-    let ask = adw::AlertDialog::new(
-        Some("Verify Device"),
-        Some(
-            "Check that the device’s own app shows exactly this fingerprint, in person or over a call. Only then is it really theirs.",
-        ),
-    );
+    let (heading, text) = if yours {
+        (
+            "Verify Your Device",
+            "On that device, open its encryption settings (in Piopio: Accounts, then the lock) and check it shows exactly this fingerprint for itself.",
+        )
+    } else {
+        (
+            "Verify Device",
+            "Ask your contact to read out the fingerprint their app shows for this device, in person or over a call. Only if it’s exactly this one is the device really theirs.",
+        )
+    };
+    let ask = adw::AlertDialog::new(Some(heading), Some(text));
     ask.set_extra_child(Some(&body));
     ask.add_responses(&[
         ("cancel", "_Cancel"),

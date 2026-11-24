@@ -556,10 +556,29 @@ async fn learn_identity(
     {
         tracing::warn!(%jid, device, "OMEMO device changed its identity key");
     }
-    let trust = if devices.iter().any(|d| d.trust == trust::VERIFIED) {
-        trust::UNDECIDED
-    } else {
-        trust::BLIND
+    // The same device's OMEMO 2 identity is the same key: carry its trust,
+    // so verifying a device that speaks both covers both.
+    let v2 = shared
+        .store
+        .devices_v(2, shared.account_id, jid.to_string())
+        .await
+        .unwrap_or_default();
+    let same_key = v2.iter().find(|d| {
+        d.device_id == device
+            && unhex(&d.identity)
+                .and_then(|ed| omemo::xeddsa::montgomery_public(&ed))
+                .is_some_and(|k| hex(&k) == identity)
+    });
+    // A record without a key (trust set before the key arrived) doesn't
+    // vouch for anything.
+    let verified_elsewhere = devices
+        .iter()
+        .chain(v2.iter())
+        .any(|d| !d.identity.is_empty() && d.trust == trust::VERIFIED);
+    let trust = match same_key {
+        Some(d) => d.trust.clone(),
+        None if verified_elsewhere => trust::UNDECIDED.to_owned(),
+        None => trust::BLIND.to_owned(),
     };
     let _ = shared
         .store
@@ -568,11 +587,11 @@ async fn learn_identity(
             jid.to_string(),
             device,
             identity,
-            trust.to_owned(),
+            trust.clone(),
         )
         .await;
     devices_changed(shared, jid).await;
-    trust.to_owned()
+    trust
 }
 
 async fn load_session(shared: &Shared, jid: &BareJid, device: u32) -> Option<omemo::Session> {

@@ -7,5 +7,6 @@
     <file>icons/scalable/actions/send-triangle-symbolic.svg</file>
     <file>icons/scalable/status/message-delivered-symbolic.svg</file>
     <file>icons/scalable/status/message-read-symbolic.svg</file>
+    <file>icons/scalable/status/device-verified-symbolic.svg</file>
   </gresource>
 </gresources>

@@ -207,3 +207,58 @@ async fn legacy_with_legacy_only_clients() {
     assert_eq!(text(&back, "encryption"), "omemo");
     assert_eq!(carol_chat.encryption().await.unwrap(), "omemo");
 }
+
+/// A contact's device that speaks both OMEMO versions has one key: verifying
+/// it while only its OMEMO 2 key is known stays verified once its legacy
+/// key arrives too.
+#[tokio::test]
+async fn verifying_covers_both_versions() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    let ivan = TestDaemon::start().await.unwrap();
+    let judy = TestDaemon::start().await.unwrap();
+    let (ivan_path, ivan_account) = ivan.add_local("ivan").await;
+    let (judy_path, _) = judy.add_local("judy").await;
+    ivan.wait_published(&ivan_path).await;
+    let judy_device = judy.wait_published(&judy_path).await;
+
+    let chat = ivan
+        .conversation(ivan_account.start_chat("judy@localhost").await.unwrap())
+        .await;
+    wait_for(20, "the conversation to use OMEMO 2", || async {
+        (chat.encryption().await.unwrap() == "omemo2").then_some(())
+    })
+    .await;
+    // Sending learns her OMEMO 2 key; Ivan verifies it before anything asks
+    // for the device list (which fetches the legacy key).
+    chat.send("Hello", HashMap::new()).await.unwrap();
+    let omemo = ivan.omemo(ivan_path.clone()).await;
+    wait_for(20, "Judy's OMEMO 2 key", || async {
+        let s = chat.get_messages("", 10).await.unwrap();
+        s.iter()
+            .any(|m| text(m, "encryption") == "omemo2" && text(m, "state") != "pending")
+            .then_some(())
+    })
+    .await;
+    omemo
+        .set_trust("judy@localhost", judy_device, "verified")
+        .await
+        .unwrap();
+
+    let device = wait_for(20, "Judy's legacy key to be learned", || async {
+        omemo
+            .get_devices("judy@localhost")
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|d| {
+                d.get("device-id").and_then(|v| u32::try_from(v).ok()) == Some(judy_device)
+                    && text(d, "protocol") == "omemo"
+                    && !text(d, "fingerprint").is_empty()
+            })
+    })
+    .await;
+    assert_eq!(text(&device, "trust"), "verified");
+}
