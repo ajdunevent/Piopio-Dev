@@ -62,3 +62,40 @@ async fn first_sync_goes_back_more_than_a_page() {
     .await;
     assert_eq!(theirs.unread().await.unwrap(), 0, "history isn't unread");
 }
+
+/// A contact's conversation that came from the roster (nothing sent or
+/// started yet) shows their encryption once it's looked at.
+#[tokio::test]
+async fn roster_conversation_learns_encryption() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    let sam = TestDaemon::start().await.unwrap();
+    let (sam_path, _) = sam.add_local("sam").await;
+    sam.wait_published(&sam_path).await;
+
+    let phone = TestDaemon::start().await.unwrap();
+    let (phone_path, _) = phone.add_local("rae").await;
+    phone
+        .roster(phone_path)
+        .await
+        .add_contact("sam@localhost", "Sam", &[])
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    let laptop = TestDaemon::start().await.unwrap();
+    let (laptop_path, _) = laptop.add_local("rae").await;
+    let chat = wait_for(30, "the roster's conversation with Sam", || async {
+        laptop
+            .conversation_with(&laptop_path, "sam@localhost")
+            .await
+    })
+    .await;
+    let chat = laptop.conversation(chat).await;
+    wait_for(20, "OMEMO 2 without sending anything", || async {
+        (chat.encryption().await.unwrap() == "omemo2").then_some(())
+    })
+    .await;
+}

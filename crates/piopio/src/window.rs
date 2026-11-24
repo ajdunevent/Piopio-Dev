@@ -909,7 +909,9 @@ fn preview(m: &Dict, room: bool) -> String {
     let body = text(m, "body");
     let first_line = body.lines().next().unwrap_or("").to_owned();
     let is_link = first_line.starts_with("aesgcm://") || first_line.starts_with("https://");
-    let is_file = first_line.starts_with("aesgcm://")
+    // A file being sent has no link yet, only its state.
+    let is_file = !text(m, "file-state").is_empty()
+        || first_line.starts_with("aesgcm://")
         || (is_link && (!text(m, "file-state").is_empty() || !text(m, "file-name").is_empty()));
     let line = if flag("retracted") {
         "<i>Message deleted</i>".to_owned()

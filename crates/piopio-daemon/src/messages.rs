@@ -1744,6 +1744,14 @@ impl ConversationObject {
     /// and the peer has announced OMEMO devices, otherwise "none".
     #[zbus(property)]
     async fn encryption(&self) -> String {
+        // Learn the peer's devices if we haven't lately (a contact whose
+        // conversation came from the roster, say); EncryptionChanged
+        // follows if that changes the answer.
+        if !self.is_room()
+            && let Some(peer) = self.peer_jid()
+        {
+            crate::omemo::refresh(&self.session, peer);
+        }
         crate::omemo::conversation_encryption(
             &self.session,
             &self.row.peer,

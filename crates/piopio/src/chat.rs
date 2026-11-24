@@ -293,6 +293,27 @@ impl ChatPage {
                 this.send();
             }
         };
+        // Pasting a picture (raw image data, as from a screenshot) offers
+        // to send it, as Dino does.
+        let weak = Rc::downgrade(&this);
+        entry.view.connect_paste_clipboard(move |view| {
+            let clipboard = view.clipboard();
+            if !clipboard
+                .formats()
+                .contains_type(gdk::Texture::static_type())
+            {
+                return;
+            }
+            view.stop_signal_emission_by_name("paste-clipboard");
+            let weak = weak.clone();
+            glib::spawn_future_local(async move {
+                if let Ok(Some(texture)) = clipboard.read_texture_future().await
+                    && let Some(this) = weak.upgrade()
+                {
+                    this.offer_image(texture);
+                }
+            });
+        });
         entry.connect_activate({
             let do_send = do_send.clone();
             move || do_send()
@@ -686,8 +707,9 @@ impl ChatPage {
         let changes = {
             let proxy = self.proxy.clone();
             client::forward(move || async move {
-                let first = proxy.peer_features().await.unwrap_or_default();
+                // Subscribed before reading, so no change slips between.
                 let later = proxy.receive_peer_features_changed().await;
+                let first = proxy.peer_features().await.unwrap_or_default();
                 Some(
                     futures_util::stream::once(async move { first })
                         .chain(later.filter_map(|c| async move { c.get().await.ok() })),
@@ -723,8 +745,8 @@ impl ChatPage {
             return;
         };
         let changes = client::forward(move || async move {
-            let first = account.server_features().await.unwrap_or_default();
             let later = account.receive_server_features_changed().await;
+            let first = account.server_features().await.unwrap_or_default();
             Some(
                 futures_util::stream::once(async move { first })
                     .chain(later.filter_map(|c| async move { c.get().await.ok() })),
@@ -820,8 +842,8 @@ impl ChatPage {
         let changes = {
             let proxy = self.proxy.clone();
             client::forward(move || async move {
-                let first = proxy.blocked().await.unwrap_or(false);
                 let later = proxy.receive_blocked_changed().await;
+                let first = proxy.blocked().await.unwrap_or(false);
                 Some(
                     futures_util::stream::once(async move { first })
                         .chain(later.filter_map(|c| async move { c.get().await.ok() })),
@@ -963,8 +985,8 @@ impl ChatPage {
         let changes = {
             let proxy = self.proxy.clone();
             client::forward(move || async move {
-                let first = proxy.encryption().await.unwrap_or_default();
                 let later = proxy.receive_encryption_changed().await;
+                let first = proxy.encryption().await.unwrap_or_default();
                 Some(
                     futures_util::stream::once(async move { first })
                         .chain(later.filter_map(|c| async move { c.get().await.ok() })),
@@ -1411,6 +1433,66 @@ impl ChatPage {
     }
 
     /// Asks for a file and shares it.
+    /// Shows a pasted picture and sends it (as PNG) if wanted.
+    fn offer_image(self: &Rc<Self>, texture: gdk::Texture) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let picture = gtk::Picture::builder()
+            .paintable(&texture)
+            .can_shrink(true)
+            .content_fit(gtk::ContentFit::Contain)
+            .height_request(220)
+            .css_classes(["attachment-picture"])
+            .build();
+        let ask = adw::AlertDialog::new(Some("Send Image?"), None);
+        ask.set_extra_child(Some(&picture));
+        ask.add_responses(&[("cancel", "_Cancel"), ("send", "_Send")]);
+        ask.set_response_appearance("send", adw::ResponseAppearance::Suggested);
+        ask.set_default_response(Some("send"));
+        let (proxy, weak) = (self.proxy.clone(), self.window.clone());
+        ask.connect_response(None, move |_, response| {
+            if response != "send" {
+                return;
+            }
+            let png = texture.save_to_png_bytes();
+            let (proxy, weak) = (proxy.clone(), weak.clone());
+            glib::spawn_future_local(async move {
+                let sent = run(async move {
+                    // Written to a private temporary file for the daemon to
+                    // read, and removed once it has.
+                    let path = glib::tmp_dir().join(format!(
+                        "piopio-pasted-{}-{}.png",
+                        std::process::id(),
+                        glib::monotonic_time()
+                    ));
+                    std::fs::write(&path, &png)
+                        .map_err(|e| zbus::Error::Failure(format!("can't keep the image: {e}")))?;
+                    let file = std::fs::File::open(&path);
+                    let _ = std::fs::remove_file(&path);
+                    let file = file
+                        .map_err(|e| zbus::Error::Failure(format!("can't read the image: {e}")))?;
+                    let name = format!(
+                        "image-{}.png",
+                        glib::DateTime::now_local()
+                            .ok()
+                            .and_then(|d| d.format("%Y%m%d-%H%M%S").ok())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default()
+                    );
+                    proxy
+                        .send_file(zbus::zvariant::Fd::from(&file), &name, HashMap::new())
+                        .await
+                })
+                .await;
+                if let (Err(e), Some(w)) = (sent, weak.upgrade()) {
+                    w.toast(&format!("Not sent: {}", client::explain(&e)));
+                }
+            });
+        });
+        ask.present(Some(&window.window));
+    }
+
     fn pick_file(self: &Rc<Self>) {
         let Some(window) = self.window.upgrade() else {
             return;
@@ -1576,6 +1658,33 @@ impl ChatPage {
             });
             emojis.append(&b);
         }
+        // Any other emoji, from GTK's picker.
+        let more = gtk::Button::builder()
+            .icon_name("list-add-symbolic")
+            .tooltip_text("More Reactions")
+            .css_classes(["flat", "circular"])
+            .build();
+        {
+            let (weak, id, p) = (Rc::downgrade(self), id.to_owned(), popover.clone());
+            more.connect_clicked(move |b| {
+                let chooser = gtk::EmojiChooser::new();
+                chooser.set_parent(b);
+                let (weak, id, p) = (weak.clone(), id.clone(), p.clone());
+                chooser.connect_emoji_picked(move |chooser, emoji| {
+                    chooser.popdown();
+                    p.popdown();
+                    if let Some(this) = weak.upgrade() {
+                        this.toggle_reaction(&id, emoji);
+                    }
+                });
+                chooser.connect_closed(|c| {
+                    let c = c.clone();
+                    glib::idle_add_local_once(move || c.unparent());
+                });
+                chooser.popup();
+            });
+        }
+        emojis.append(&more);
         content.append(&emojis);
 
         let item = |label: &str, action: MenuAction| {
@@ -1622,9 +1731,18 @@ impl ChatPage {
             ));
         }
         popover.set_child(Some(&content));
-        popover.connect_closed(|p| {
+        // Focus back to the box to write in: left to itself, it lands on
+        // the message's text and selects all of it.
+        let weak = Rc::downgrade(self);
+        popover.connect_closed(move |p| {
             let p = p.clone();
-            glib::idle_add_local_once(move || p.unparent());
+            let weak = weak.clone();
+            glib::idle_add_local_once(move || {
+                p.unparent();
+                if let Some(this) = weak.upgrade() {
+                    this.entry.grab_focus();
+                }
+            });
         });
         popover.popup();
     }
