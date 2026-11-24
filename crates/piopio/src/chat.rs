@@ -183,7 +183,7 @@ impl ChatPage {
             .build();
         let send_lock = gtk::Image::builder()
             .icon_name("changes-allow-symbolic")
-            .pixel_size(10)
+            .pixel_size(13)
             .halign(gtk::Align::Start)
             .valign(gtk::Align::End)
             .css_classes(["send-lock"])
