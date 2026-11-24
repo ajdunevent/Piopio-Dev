@@ -34,6 +34,7 @@ struct Entry {
     pinned: bool,
     /// The newest message's preview, shown again when typing stops.
     preview_text: String,
+    unread: u32,
 }
 
 /// What the window shows about an account.
@@ -195,6 +196,20 @@ impl Window {
             placeholder,
         });
 
+        // Coming back to the window, or to the chat on a narrow one, reads
+        // what arrived meanwhile.
+        let weak = Rc::downgrade(&this);
+        this.window.connect_is_active_notify(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.read_open_conversation();
+            }
+        });
+        let weak = Rc::downgrade(&this);
+        this.split.connect_show_content_notify(move |_| {
+            if let Some(this) = weak.upgrade() {
+                this.read_open_conversation();
+            }
+        });
         let weak = Rc::downgrade(&this);
         crate::timefmt::on_change(move || {
             if let Some(this) = weak.upgrade() {
@@ -221,6 +236,37 @@ impl Window {
             }
         });
         this
+    }
+
+    /// Whether the conversation `key` is in front of the user: open, its
+    /// chat on screen (not hidden behind the list on a narrow window), and
+    /// the window focused.
+    fn reading(&self, key: &str) -> bool {
+        let open = self.open.borrow().as_ref().is_some_and(|(k, _)| k == key);
+        open && self.window.is_active()
+            && (!self.split.is_collapsed() || self.split.shows_content())
+    }
+
+    /// Marks the open conversation read if it has just come into view.
+    fn read_open_conversation(&self) {
+        let Some(key) = self.open.borrow().as_ref().map(|(k, _)| k.clone()) else {
+            return;
+        };
+        if !self.reading(&key) {
+            return;
+        }
+        let mut entries = self.entries.borrow_mut();
+        let Some(entry) = entries.get_mut(&key) else {
+            return;
+        };
+        if entry.unread == 0 {
+            return;
+        }
+        set_unread(&entry.badge, &entry.row, 0);
+        let proxy = entry.proxy.clone();
+        glib::spawn_future_local(async move {
+            let _ = run(async move { proxy.mark_read().await }).await;
+        });
     }
 
     pub fn toast(&self, text: &str) {
@@ -645,6 +691,7 @@ impl Window {
                 last_activity: last,
                 pinned,
                 preview_text,
+                unread,
             },
         );
         store_sort_keys(&row, last, pinned);
@@ -725,15 +772,17 @@ impl Window {
                 }
             }
             RowEvent::Unread(n) => {
-                let open = self.open.borrow().as_ref().is_some_and(|(k, _)| k == key);
-                if open && n > 0 && self.window.is_active() {
-                    // Reading it right now.
+                entry.unread = n;
+                if n > 0 && self.reading(key) {
+                    // On screen right now: read, so never shown as new.
                     let proxy = entry.proxy.clone();
                     glib::spawn_future_local(async move {
                         let _ = run(async move { proxy.mark_read().await }).await;
                     });
+                    set_unread(&entry.badge, &entry.row, 0);
+                } else {
+                    set_unread(&entry.badge, &entry.row, n);
                 }
-                set_unread(&entry.badge, &entry.row, n);
             }
             RowEvent::Title(t) => {
                 entry.name.set_label(&t);
