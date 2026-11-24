@@ -4,7 +4,7 @@
 <gresources>
   <gresource prefix="/net/dunevent/Piopio">
     <file>style.css</file>
-    <file>icons/scalable/actions/paper-plane-symbolic.svg</file>
+    <file>icons/scalable/actions/send-triangle-symbolic.svg</file>
     <file>icons/scalable/status/message-delivered-symbolic.svg</file>
     <file>icons/scalable/status/message-read-symbolic.svg</file>
   </gresource>

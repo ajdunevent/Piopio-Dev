@@ -43,18 +43,15 @@ pub struct ChatPage {
     own_jid: String,
     send: gtk::Button,
     send_lock: gtk::Image,
-    title: adw::WindowTitle,
+    title: HeaderTitle,
     /// The account this conversation belongs to (its object path).
     account: String,
     /// Shown while the peer is blocked, with Unblock.
     blocked_banner: adw::Banner,
     composer: gtk::Widget,
     /// The pictures and name beside each message.
-    peer_name: RefCell<String>,
-    peer_picture: RefCell<Option<gdk::Texture>>,
-    own_picture: RefCell<Option<gdk::Texture>>,
     /// Each message's picture and name, shown only on the first of a run.
-    decorations: RefCell<HashMap<String, (adw::Avatar, gtk::Label)>>,
+    decorations: RefCell<HashMap<String, gtk::Label>>,
     /// What the peer's apps support; empty while unknown.
     peer_features: RefCell<Vec<String>>,
     attach: gtk::Button,
@@ -94,13 +91,15 @@ impl ChatPage {
         proxy: ConversationProxy<'static>,
         own_jid: String,
     ) -> Rc<Self> {
-        let title = adw::WindowTitle::new("", "");
+        let title = HeaderTitle::new();
         let people = gtk::MenuButton::builder()
             .icon_name("system-users-symbolic")
             .tooltip_text("People")
             .visible(false)
             .build();
-        let header = adw::HeaderBar::builder().title_widget(&title).build();
+        // Picture, name and address at the start, left-aligned.
+        let header = adw::HeaderBar::builder().show_title(false).build();
+        header.pack_start(&title.widget);
         let menu = gtk::gio::Menu::new();
         menu.append(Some("Conversation _Details…"), Some("chat.details"));
         menu.append(Some("_Delete Conversation…"), Some("chat.delete"));
@@ -174,22 +173,23 @@ impl ChatPage {
         // Red with an open lock until the conversation is known to be
         // encrypted.
         // The plane, with an open padlock over its corner while unencrypted.
-        let plane = gtk::Image::builder()
-            .icon_name("paper-plane-symbolic")
-            .margin_top(4)
-            .margin_bottom(4)
-            .margin_start(4)
-            .margin_end(4)
+        // A triangle pointing right with a padlock inside: closed (in the
+        // button's colour, as if cut out) when encrypted, open and red when
+        // not.
+        let triangle = gtk::Image::builder()
+            .icon_name("send-triangle-symbolic")
+            .pixel_size(26)
             .build();
         let send_lock = gtk::Image::builder()
             .icon_name("changes-allow-symbolic")
-            .pixel_size(13)
+            .pixel_size(11)
             .halign(gtk::Align::Start)
-            .valign(gtk::Align::End)
-            .css_classes(["send-lock"])
+            .valign(gtk::Align::Center)
+            .margin_start(5)
+            .css_classes(["send-lock", "open"])
             .build();
         let send_icon = gtk::Overlay::builder()
-            .child(&plane)
+            .child(&triangle)
             .halign(gtk::Align::Center)
             .valign(gtk::Align::Center)
             .build();
@@ -264,9 +264,6 @@ impl ChatPage {
             account,
             blocked_banner: blocked_banner.clone(),
             composer: composer.clone().upcast(),
-            peer_name: RefCell::default(),
-            peer_picture: RefCell::default(),
-            own_picture: RefCell::default(),
             decorations: RefCell::default(),
             peer_features: RefCell::default(),
             attach: attach.clone(),
@@ -409,7 +406,6 @@ impl ChatPage {
             .await
             {
                 title.set_title(&name);
-                *this.peer_name.borrow_mut() = name.clone();
                 let subtitle = if name == peer { "" } else { &peer };
                 title.set_subtitle(subtitle);
                 *this.subtitle.borrow_mut() = subtitle.to_owned();
@@ -849,29 +845,13 @@ impl ChatPage {
         });
     }
 
-    /// The pictures beside messages: the peer's and the account's own.
-    /// Messages are redrawn when either changes, or the peer's name.
+    /// The peer's picture in the header, kept current with the name.
     async fn load_pictures(self: &Rc<Self>) {
-        let own = self.window.upgrade().and_then(|w| {
-            w.accounts
-                .borrow()
-                .iter()
-                .find(|a| a.path.as_str() == self.account)
-                .map(|a| a.proxy.clone())
-        });
         let proxy = self.proxy.clone();
-        let (peer, mine) = run(async move {
-            let peer = proxy.avatar().await.unwrap_or_default();
-            let mine = match own {
-                Some(own) => own.avatar().await.unwrap_or_default(),
-                None => String::new(),
-            };
-            (peer, mine)
-        })
-        .await;
-        *self.peer_picture.borrow_mut() = texture(&peer);
-        *self.own_picture.borrow_mut() = texture(&mine);
-
+        let picture = run(async move { proxy.avatar().await.unwrap_or_default() }).await;
+        self.title
+            .avatar
+            .set_custom_image(texture(&picture).as_ref());
         let changes = {
             let proxy = self.proxy.clone();
             client::forward(move || async move {
@@ -888,21 +868,13 @@ impl ChatPage {
             while let Ok((is_picture, value)) = changes.recv().await {
                 let Some(this) = weak.upgrade() else { break };
                 if is_picture {
-                    *this.peer_picture.borrow_mut() = texture(&value);
+                    this.title.avatar.set_custom_image(texture(&value).as_ref());
                 } else {
-                    *this.peer_name.borrow_mut() = value;
+                    this.title.set_title(&value);
+                    this.page.set_title(&value);
                 }
-                this.redraw_all();
             }
         });
-    }
-
-    fn redraw_all(self: &Rc<Self>) {
-        let rows: Vec<(gtk::Box, Dict)> = self.rows.borrow().values().cloned().collect();
-        for (row, m) in rows {
-            set_child(&row, &self.message(&m));
-        }
-        self.regroup();
     }
 
     pub fn confirm_delete(self: &Rc<Self>) {
@@ -1012,13 +984,15 @@ impl ChatPage {
                 let Some(this) = weak.upgrade() else { break };
                 let encrypted = encryption == "omemo" || encryption == "omemo2";
                 if encrypted {
-                    this.send_lock.set_visible(false);
+                    this.send_lock
+                        .set_icon_name(Some("changes-prevent-symbolic"));
+                    this.send_lock.set_css_classes(&["send-lock", "closed"]);
                     this.send.set_tooltip_text(Some("Send Encrypted"));
                     this.send.set_css_classes(&["suggested-action", "send"]);
                 } else {
-                    this.send_lock.set_visible(true);
+                    this.send_lock.set_icon_name(Some("changes-allow-symbolic"));
+                    this.send_lock.set_css_classes(&["send-lock", "open"]);
                     this.send.set_tooltip_text(Some("Send Unencrypted"));
-                    // The padlock badge says it; the button stays as it is.
                     this.send.set_css_classes(&["suggested-action", "send"]);
                 }
                 this.entry.set_placeholder_text(Some(if encrypted {
@@ -1097,9 +1071,7 @@ impl ChatPage {
             let first = previous
                 .as_ref()
                 .is_none_or(|(s, t)| *s != sender || at - t > GAP_MS);
-            if let Some((avatar, label)) = decorations.get(id.as_str()) {
-                // Hidden, the picture still holds its place so bubbles line up.
-                avatar.set_opacity(if first { 1.0 } else { 0.0 });
+            if let Some(label) = decorations.get(id.as_str()) {
                 label.set_visible(first);
             }
             // Space above a run, none within it. Margins rather than CSS
@@ -1139,46 +1111,29 @@ impl ChatPage {
 
     /// A message with the sender's picture and name beside it: on the left
     /// for others, on the right for us.
+    /// A message with its menu beside it. Group chats also name the
+    /// sender (on the first message of a run); a chat with one person
+    /// doesn't need to.
     fn message(self: &Rc<Self>, m: &Dict) -> gtk::Widget {
         let outgoing = flag(m, "outgoing");
-        let sender = text(m, "sender");
-        let (name, picture) = if outgoing {
-            ("Me".to_owned(), self.own_picture.borrow().clone())
-        } else if self.is_room.get() {
+        let column = self.bubble(m);
+        if self.is_room.get() && !outgoing {
+            let sender = text(m, "sender");
             let nick = sender
                 .split_once('/')
                 .map(|(_, n)| n.to_owned())
                 .unwrap_or(sender);
-            (nick, None)
-        } else {
-            (
-                self.peer_name.borrow().clone(),
-                self.peer_picture.borrow().clone(),
-            )
-        };
-        // Our own initials come from our address, not from "Me".
-        let initials_from = if outgoing {
-            self.own_jid.clone()
-        } else {
-            name.clone()
-        };
-        let avatar = adw::Avatar::new(32, Some(&initials_from), true);
-        avatar.set_custom_image(picture.as_ref());
-        avatar.set_valign(gtk::Align::Start);
-        avatar.set_margin_top(16);
-        let label = gtk::Label::builder()
-            .label(&name)
-            .xalign(if outgoing { 1.0 } else { 0.0 })
-            .ellipsize(gtk::pango::EllipsizeMode::End)
-            .css_classes(["message-sender"])
-            .build();
-        let column = self.bubble(m);
-        if let Some(column) = column.downcast_ref::<gtk::Box>() {
-            column.prepend(&label);
+            let label = gtk::Label::builder()
+                .label(&nick)
+                .xalign(0.0)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .css_classes(["message-sender"])
+                .build();
+            if let Some(column) = column.downcast_ref::<gtk::Box>() {
+                column.prepend(&label);
+            }
+            self.decorations.borrow_mut().insert(text(m, "id"), label);
         }
-        self.decorations
-            .borrow_mut()
-            .insert(text(m, "id"), (avatar.clone(), label.clone()));
         let line = gtk::Box::builder()
             .spacing(6)
             .halign(if outgoing {
@@ -1205,9 +1160,7 @@ impl ChatPage {
         if outgoing {
             line.append(&dots);
             line.append(&column);
-            line.append(&avatar);
         } else {
-            line.append(&avatar);
             line.append(&column);
             line.append(&dots);
         }
@@ -1908,6 +1861,62 @@ fn reactions(dict: &Dict) -> HashMap<String, Vec<String>> {
             HashMap::<String, Vec<String>>::try_from(v.try_clone().ok()?).ok()
         })
         .unwrap_or_default()
+}
+
+/// The chat's title in the header: the peer's picture with their name and
+/// address beside it, left-aligned.
+#[derive(Clone)]
+struct HeaderTitle {
+    widget: gtk::Box,
+    avatar: adw::Avatar,
+    title: gtk::Label,
+    subtitle: gtk::Label,
+}
+
+impl HeaderTitle {
+    fn new() -> Self {
+        let avatar = adw::Avatar::new(32, None, true);
+        let title = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .css_classes(["title"])
+            .build();
+        let subtitle = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .visible(false)
+            .css_classes(["subtitle"])
+            .build();
+        let labels = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .valign(gtk::Align::Center)
+            .build();
+        labels.append(&title);
+        labels.append(&subtitle);
+        let widget = gtk::Box::builder()
+            .spacing(10)
+            .margin_start(4)
+            .css_classes(["chat-title"])
+            .build();
+        widget.append(&avatar);
+        widget.append(&labels);
+        Self {
+            widget,
+            avatar,
+            title,
+            subtitle,
+        }
+    }
+
+    fn set_title(&self, title: &str) {
+        self.title.set_label(title);
+        self.avatar.set_text(Some(title));
+    }
+
+    fn set_subtitle(&self, subtitle: &str) {
+        self.subtitle.set_label(subtitle);
+        self.subtitle.set_visible(!subtitle.is_empty());
+    }
 }
 
 /// Replaces a message row's only child.

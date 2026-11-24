@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Piopio's Send: a triangle with rounded points, pointing right.
+     GPL-3.0-or-later. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path d="M2.6 2.4 L14 8 L2.6 13.6 Z" fill="#000000" stroke="#000000" stroke-width="2.4" stroke-linejoin="round"/>
+</svg>

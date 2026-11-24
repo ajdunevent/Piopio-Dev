@@ -35,9 +35,12 @@ avatar { border-radius: 22%; }
 .chat-history { background: none; padding: 6px 12px; }
 .chat-history > .message-row { padding-bottom: 1px; }
 .message-sender { font-weight: bold; font-size: smaller; margin: 0 8px 1px 8px; }
+.chat-title .title { font-weight: bold; }
+.chat-title .subtitle { font-size: smaller; opacity: 0.55; }
 .bubble { border-radius: 14px; padding: 6px 10px; margin: 0 2px; }
-.bubble.incoming { background-color: alpha(currentColor, 0.08); }
+.bubble.incoming { background-color: alpha(currentColor, 0.08); border-bottom-left-radius: 3px; }
 .bubble.outgoing {
+  border-bottom-right-radius: 3px;
   background-color: @accent_bg_color;
   color: @accent_fg_color;
 }
@@ -48,8 +51,9 @@ avatar { border-radius: 22%; }
 .bubble.pending { opacity: 0.55; }
 button.message-menu { opacity: 0.45; min-width: 24px; min-height: 24px; padding: 0; }
 button.message-menu:hover { opacity: 1; }
-/* Send, unencrypted: a dark red open padlock over the plane's corner. */
-.send-lock { color: #a51d2d; }
+/* Send: the padlock inside the triangle. */
+.send-lock.closed { color: @accent_bg_color; }
+.send-lock.open { color: #c01c28; }
 .undecryptable { font-style: italic; opacity: 0.7; }
 .bubble .quote {
   border-left: 3px solid alpha(currentColor, 0.5);
