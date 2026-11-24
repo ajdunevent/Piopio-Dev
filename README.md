@@ -16,60 +16,75 @@ difference, and OMEMO is on from the first message.
 
 ## What works
 
-- **Accounts:** add, log in (STARTTLS, SCRAM), turn off and on, change the
-  password, remove. Accounts and everything else live in an encrypted
-  SQLCipher database whose key is kept in the keyring (the Secret portal
-  inside Flatpak), and reconnect when the daemon starts.
+- **Accounts:** add, log in (direct TLS where the server publishes it, else
+  STARTTLS; SCRAM), turn off and on, change the password, remove, set your
+  picture. Accounts and everything else live in an encrypted SQLCipher
+  database whose key is kept in the keyring (the Secret portal inside
+  Flatpak), and reconnect when the daemon starts. The server is told
+  whether a window is open (Client State Indication), so it can hold back
+  unurgent traffic while none is.
 - **Contacts:** roster with versioning, presence, adding and renaming
   contacts, accepting or declining contact requests, blocking (XEP-0191,
-  shared with your other devices).
+  shared with your other devices; a blocked contact leaves the list and is
+  unblocked from Preferences).
 - **One-to-one chat:** sending and receiving, delivery receipts and read
   markers, typing notifications, Carbons for your other devices, and
-  catch-up from the server archive (MAM) after being offline; duplicates are
-  dropped.
+  catch-up from the server archive (MAM) after being offline, with fuller
+  history and the whole roster on first setup; duplicates are dropped.
 - **OMEMO**, both versions, implemented in pure Rust in `piopio-omemo` and
   checked in CI against python-oldmemo and python-twomemo in both
   directions. The original version (`eu.siacs.conversations.axolotl`, what
   Conversations, Dino, Gajim, Monal and Converse.js speak) is on by default
   whenever the other side has it. OMEMO 2 (`urn:xmpp:omemo:2`, with
-  stanza content encryption) is used in a chat when every device on both
-  sides reads it, and never mixed with the original in one chat. Blind
-  Trust Before Verification, fingerprints and per-device trust in the
-  Encryption dialog. Messages are never sent in the clear to someone who
-  uses OMEMO.
-- **Replies, corrections, reactions, deleting for everyone** (XEP-0461,
-  0308, 0444, 0424), from a message's menu (right click or long press).
+  stanza content encryption) is used, in one-to-one and group chats, when
+  every device involved reads it, and never mixed with the original in
+  one chat. Blind Trust Before Verification, and verifying devices by
+  comparing fingerprints: a contact's in Conversation Details, your own
+  from each account's Encryption page in Accounts. Messages are never
+  sent in the clear to someone who uses OMEMO.
+- **Replies, corrections, reactions (any emoji), deleting for everyone**
+  (XEP-0461, 0308, 0444, 0424), from each message's menu.
 - **Group chats:** joining (Ctrl+J), history from the room's archive,
   occupants, bookmarks shared with your other devices, leaving and
   rejoining, invitations. Private rooms (members-only, non-anonymous) can
   be created from the Join dialog and are OMEMO encrypted.
 - **Files:** sharing through the server's upload service, encrypted
-  (`aesgcm://`) in OMEMO chats; pictures download by themselves and get
-  thumbnails made by the daemon.
-- **Avatars:** contacts' pictures (PEP, or vCard for those who only
-  publish one there), and setting your own in Accounts.
-- **Conversation Details:** the contact, encryption and devices, pinning,
-  muting, and typing notifications and read receipts per conversation
-  (overriding the account's defaults), Block and Delete.
+  (`aesgcm://`) in OMEMO chats; without an upload service, straight to the
+  contact's device over Jingle (XEP-0234, in-band bytestreams). Pasting a
+  picture offers to send it. Pictures download by themselves and get
+  thumbnails made by the daemon; animated GIF, APNG and WebP play.
 - **Calls:** voice and video calls with anyone whose client speaks Jingle
   RTP (XEP-0167) with ICE and DTLS-SRTP, rung through Jingle Message
   Initiation (XEP-0353) so every device rings. The daemon does the
   signalling; the media (Opus, VP8) runs in the window through GStreamer's
   webrtcbin, in `piopio-call`.
-- **Background:** the daemon runs with no window, asks the Background portal
-  for autostart inside Flatpak, and shows notifications through the
-  Notification portal while no window is open (in group chats only when
-  you're mentioned). Clicking one opens the chat.
+- **Background and notifications:** the daemon runs with no window, can
+  start at login (the Background portal inside Flatpak), and shows
+  notifications while no window is open (in group chats only when you're
+  mentioned), withdrawn once read anywhere. A notification sound for the
+  app and per conversation, with a preview, and per-conversation ringing
+  through Do Not Disturb and feedbackd's quiet modes.
 - **Window:** a conversation list after Dino's (pictures, times that follow
-  the desktop's 12/24-hour setting, pinned and muted marks, typing),
-  pictures and names beside messages, a Send button attached to the box
-  that turns red with an open lock when a message would go unencrypted,
-  delivery ticks, a Status menu, and New Chat and Join Group Chat under +;
-  adapts down to 360px.
+  the desktop's 12/24-hour setting, pinned and muted marks, typing,
+  previews), messages grouped by sender with delivery and read ticks, a
+  padlock wherever a message isn't encrypted, a message box that grows
+  with its Send button attached, Conversation Details (contact, display
+  name, encryption, pinning, muting, typing and read receipts, sound,
+  Block, Delete), Preferences, and a Quit that really quits; adapts down
+  to 360px. Features a contact's app doesn't support aren't offered.
 
-Not yet: OMEMO 2 in group chats, Jingle file transfer, group calls,
-Client State Indication (blocked on tokio-xmpp sending nonzas), direct TLS
-and SASL2/FAST.
+Not yet:
+
+- **Group calls.** Dino and Movim make them with Muji (XEP-0272) and Call
+  Invites (XEP-0482): every participant calls every other through the
+  room. It needs a call window for several streams and testing against
+  both; one-to-one calls work with everyone.
+- **SASL2, Bind 2 and FAST** (faster, password-free reconnects). tokio-xmpp
+  6 can neither read SASL2's elements nor accept a stream bound at login,
+  so these wait for the library.
+- **Encrypted Jingle file transfer** (JET): no two clients agree on it yet,
+  so direct files only go in unencrypted conversations; encrypted ones use
+  the upload service.
 
 ## Layout
 
