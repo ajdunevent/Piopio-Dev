@@ -65,7 +65,7 @@ pub struct ChatPage {
     me: RefCell<String>,
     messages: gtk::Box,
     scroller: gtk::ScrolledWindow,
-    entry: gtk::Entry,
+    entry: Composer,
     /// Shown above the box while replying or editing.
     mode_bar: gtk::Box,
     mode_label: gtk::Label,
@@ -165,14 +165,7 @@ impl ChatPage {
         mode_bar.append(&mode_label);
         mode_bar.append(&mode_cancel);
 
-        let entry = gtk::Entry::builder()
-            .hexpand(true)
-            .placeholder_text("Message")
-            .input_hints(gtk::InputHints::SPELLCHECK | gtk::InputHints::EMOJI)
-            .build();
-        // Red with an open lock until the conversation is known to be
-        // encrypted.
-        // The plane, with an open padlock over its corner while unencrypted.
+        let entry = Composer::new();
         // A triangle pointing right with a padlock inside: closed (in the
         // button's colour, as if cut out) when encrypted, open and red when
         // not.
@@ -204,7 +197,7 @@ impl ChatPage {
             .valign(gtk::Align::Center)
             .css_classes(["linked", "composer"])
             .build();
-        linked.append(&entry);
+        linked.append(&entry.widget);
         linked.append(&send);
         let row = gtk::Box::builder()
             .spacing(6)
@@ -289,9 +282,9 @@ impl ChatPage {
         });
 
         let weak = Rc::downgrade(&this);
-        entry.connect_changed(move |e| {
+        entry.connect_changed(move |text| {
             if let Some(this) = weak.upgrade() {
-                this.typed(!e.text().is_empty());
+                this.typed(!text.is_empty());
             }
         });
         let weak = Rc::downgrade(&this);
@@ -302,7 +295,7 @@ impl ChatPage {
         };
         entry.connect_activate({
             let do_send = do_send.clone();
-            move |_| do_send()
+            move || do_send()
         });
         send.connect_clicked(move |_| do_send());
 
@@ -1654,7 +1647,6 @@ impl ChatPage {
             Mode::Edit(id) => {
                 let Some(m) = message(id) else { return };
                 self.entry.set_text(&text(&m, "body"));
-                self.entry.set_position(-1);
                 self.mode_label.set_label("Editing message");
                 self.mode_bar.set_visible(true);
             }
@@ -1916,6 +1908,129 @@ impl HeaderTitle {
     fn set_subtitle(&self, subtitle: &str) {
         self.subtitle.set_label(subtitle);
         self.subtitle.set_visible(!subtitle.is_empty());
+    }
+}
+
+/// The box to write in: grows with what's written (up to a few lines, then
+/// scrolls), Enter sends and Shift+Enter starts a new line.
+#[derive(Clone)]
+struct Composer {
+    widget: gtk::Widget,
+    view: gtk::TextView,
+    placeholder: gtk::Label,
+}
+
+impl Composer {
+    const MAX_HEIGHT: i32 = 180;
+
+    fn new() -> Self {
+        let view = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .accepts_tab(false)
+            .input_hints(gtk::InputHints::SPELLCHECK | gtk::InputHints::EMOJI)
+            .top_margin(9)
+            .bottom_margin(9)
+            .left_margin(10)
+            .right_margin(10)
+            .css_classes(["composer-text"])
+            .build();
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::External)
+            .propagate_natural_height(true)
+            .max_content_height(Self::MAX_HEIGHT)
+            .hexpand(true)
+            .child(&view)
+            .build();
+        let placeholder = gtk::Label::builder()
+            .label("Message")
+            .xalign(0.0)
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .margin_start(11)
+            .margin_top(9)
+            .can_target(false)
+            .css_classes(["dim-label"])
+            .build();
+        let overlay = gtk::Overlay::builder()
+            .child(&scroller)
+            .hexpand(true)
+            .css_classes(["composer-box"])
+            .build();
+        overlay.add_overlay(&placeholder);
+        let composer = Self {
+            widget: overlay.upcast(),
+            view,
+            placeholder,
+        };
+        let placeholder = composer.placeholder.clone();
+        // No scrollbar until the text outgrows the box: even unused, it
+        // makes the box taller than one line.
+        let (view, s) = (composer.view.clone(), scroller.clone());
+        composer.view.buffer().connect_changed(move |b| {
+            placeholder.set_visible(b.char_count() == 0);
+            let (view, s) = (view.clone(), s.clone());
+            glib::idle_add_local_once(move || {
+                let (_, natural, _, _) = view.measure(gtk::Orientation::Vertical, view.width());
+                s.set_vscrollbar_policy(if natural > Self::MAX_HEIGHT {
+                    gtk::PolicyType::Automatic
+                } else {
+                    gtk::PolicyType::External
+                });
+            });
+        });
+        composer
+    }
+
+    fn text(&self) -> String {
+        let buffer = self.view.buffer();
+        buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .to_string()
+    }
+
+    /// Replaces the text, leaving the cursor at its end.
+    fn set_text(&self, text: &str) {
+        let buffer = self.view.buffer();
+        buffer.set_text(text);
+        buffer.place_cursor(&buffer.end_iter());
+    }
+
+    fn set_placeholder_text(&self, text: Option<&str>) {
+        self.placeholder.set_label(text.unwrap_or(""));
+    }
+
+    fn grab_focus(&self) {
+        self.view.grab_focus();
+    }
+
+    fn clipboard(&self) -> gdk::Clipboard {
+        self.view.clipboard()
+    }
+
+    fn connect_changed(&self, f: impl Fn(&str) + 'static) {
+        let this = self.clone();
+        self.view.buffer().connect_changed(move |_| f(&this.text()));
+    }
+
+    /// Enter (without Shift) sends.
+    fn connect_activate(&self, f: impl Fn() + 'static) {
+        let keys = gtk::EventControllerKey::builder()
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let enter = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter);
+            if enter && !state.contains(gdk::ModifierType::SHIFT_MASK) {
+                f();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        self.view.add_controller(keys);
+    }
+
+    fn add_controller(&self, controller: impl IsA<gtk::EventController>) {
+        self.view.add_controller(controller);
     }
 }
 
