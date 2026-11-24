@@ -441,17 +441,22 @@ pub(crate) async fn devices_changed(shared: &Shared, jid: &BareJid) {
     let emitter = SignalEmitter::new(&shared.bus, shared.path.clone()).expect("valid path");
     let _ = OmemoObject::devices_changed(&emitter, jid.as_str()).await;
     shared.conversations.encryption_changed(shared, jid).await;
+    // A member's devices decide which OMEMO a private room uses.
+    for room in shared.rooms.private_with(jid).await {
+        shared.conversations.encryption_changed(shared, &room).await;
+    }
 }
 
 /// Makes sure we know `jid`'s devices: fetched once per login, and again
 /// once the list is old (notifications keep contacts' lists current).
-async fn ensure_devices(shared: &Shared, jid: &BareJid) {
-    crate::omemo2::ensure_devices(shared, jid).await;
+/// True if either list was fetched now.
+async fn ensure_devices(shared: &Shared, jid: &BareJid) -> bool {
+    let fetched2 = crate::omemo2::ensure_devices(shared, jid).await;
     if let Some(when) = shared.omemo.fetched.lock().await.get(jid.as_str())
         && when.elapsed() < DEVICE_LIST_TTL
     {
         tracing::debug!(account = %shared.jid, %jid, "device list is recent");
-        return;
+        return fetched2;
     }
     tracing::debug!(account = %shared.jid, %jid, "fetching the device list");
     let ids = match fetch_item(shared, jid, ns::LEGACY_OMEMO_DEVICELIST).await {
@@ -466,6 +471,7 @@ async fn ensure_devices(shared: &Shared, jid: &BareJid) {
         .lock()
         .await
         .insert(jid.to_string(), Instant::now());
+    true
 }
 
 /// Fetches `jid`'s device list in the background if ours is missing or old.
@@ -474,7 +480,31 @@ pub fn refresh(session: &Session, jid: BareJid) {
         return;
     }
     let session = session.clone();
-    tokio::spawn(async move { ensure_devices(&session, &jid).await });
+    tokio::spawn(async move {
+        // A room's encryption depends on its members' devices.
+        match session.rooms.get(jid.as_str()).await {
+            Some(live) if live.private => {
+                let mut fetched = ensure_devices(&session, &session.jid.clone()).await;
+                for m in live.members.iter().filter(|m| **m != session.jid) {
+                    fetched |= ensure_devices(&session, m).await;
+                }
+                // The lists may have arrived before we knew who the members
+                // were; then nothing announced the room's encryption again.
+                // (Only after a fetch, so reading it again can't loop.)
+                if fetched {
+                    session
+                        .conversations
+                        .encryption_changed(&session, &jid)
+                        .await;
+                }
+            }
+            Some(_) => {}
+            None if session.rooms.is_room(jid.as_str()).await => {}
+            None => {
+                ensure_devices(&session, &jid).await;
+            }
+        }
+    });
 }
 
 /// Fetches the bundles of `jid`'s devices (both versions) whose keys we
@@ -510,7 +540,13 @@ pub async fn conversation_encryption(shared: &Shared, peer: &str, wanted: bool) 
     }
     // Group chats: encrypted when members-only and non-anonymous.
     if let Some(live) = shared.rooms.get(peer).await {
-        return if live.private { "omemo" } else { "none" };
+        return if !live.private {
+            "none"
+        } else if crate::omemo2::prefers_v2_group(shared, &live.members).await {
+            "omemo2"
+        } else {
+            "omemo"
+        };
     }
     if let Ok(jid) = peer.parse::<BareJid>()
         && crate::omemo2::prefers_v2(shared, &jid).await
@@ -643,6 +679,22 @@ pub async fn use_v2(shared: &Shared, peer: &BareJid) -> bool {
     ensure_devices(shared, peer).await;
     ensure_devices(shared, &shared.jid.clone()).await;
     crate::omemo2::prefers_v2(shared, peer).await
+}
+
+/// Fetches the members' device lists if old, then says whether the group
+/// chat uses OMEMO 2: only when every other member (and every other device
+/// of ours) reads it, never mixed with the original in one room.
+pub async fn use_v2_group(shared: &Shared, members: &[BareJid]) -> bool {
+    ensure_devices(shared, &shared.jid.clone()).await;
+    let others: Vec<BareJid> = members
+        .iter()
+        .filter(|m| **m != shared.jid)
+        .cloned()
+        .collect();
+    for m in &others {
+        ensure_devices(shared, m).await;
+    }
+    crate::omemo2::prefers_v2_group(shared, members).await
 }
 
 /// Encrypts for a private group chat's members: every member must use

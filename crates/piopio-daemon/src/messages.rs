@@ -542,7 +542,11 @@ async fn handle(
         } else {
             peer.clone()
         };
-        match crate::omemo2::decrypt(session, &sender, &encrypted).await {
+        let to = crate::omemo2::Addressee {
+            jid: &peer,
+            group: false,
+        };
+        match crate::omemo2::decrypt(session, &sender, to, &encrypted).await {
             crate::omemo2::Opened::Content(content, trusted) => {
                 message.bodies.clear();
                 for c in content {
@@ -763,6 +767,97 @@ async fn handle_room(
         return;
     };
 
+    // OMEMO 2: open the envelope first, so what it carries (body, replies,
+    // corrections, reactions) is handled like the same elements in the clear.
+    let mut v2_label: Option<&'static str> = None;
+    if let Some(i) = message
+        .payloads
+        .iter()
+        .position(|p| p.is("encrypted", crate::omemo2::NS))
+    {
+        let encrypted = message.payloads.remove(i);
+        let has_payload = encrypted.has_child("payload", crate::omemo2::NS);
+        let origin = message
+            .payloads
+            .iter()
+            .find(|p| p.is("origin-id", "urn:xmpp:sid:0"))
+            .and_then(|o| o.attr("id"))
+            .map(str::to_owned)
+            .or_else(|| message.id.as_ref().map(|i| i.0.clone()));
+        if outgoing
+            && source == Source::Live
+            && let Some(origin) = &origin
+        {
+            // Our own message, reflected by the room: it got there.
+            mark(session, &room, origin, state::RECEIVED).await;
+        }
+        // Ours, or seen before: decrypting again would only fail.
+        if let Some(origin) = &origin
+            && session
+                .store
+                .has_message(conversation, origin.clone(), outgoing)
+                .await
+                .unwrap_or(false)
+        {
+            return;
+        }
+        // Who really sent it: from the occupant list, or by whose device
+        // it came from.
+        let live = session.rooms.get(room.as_str()).await.unwrap_or_default();
+        let real = if outgoing {
+            Some(session.jid.clone())
+        } else {
+            match live
+                .occupants
+                .get(&nick)
+                .and_then(|o| o.jid.parse::<BareJid>().ok())
+            {
+                Some(j) => Some(j),
+                None => match crate::omemo2::sender_device(&encrypted) {
+                    Some(device) => {
+                        crate::omemo2::owner_of_device(session, &live.members, device).await
+                    }
+                    None => None,
+                },
+            }
+        };
+        let opened = match &real {
+            Some(jid) => {
+                let to = crate::omemo2::Addressee {
+                    jid: &room,
+                    group: true,
+                };
+                crate::omemo2::decrypt(session, jid, to, &encrypted).await
+            }
+            None => crate::omemo2::Opened::Other(crate::omemo::Decrypted::Failed(
+                "unknown sender".into(),
+            )),
+        };
+        match opened {
+            crate::omemo2::Opened::Content(content, trusted) => {
+                message.bodies.clear();
+                for c in content {
+                    if c.name() == "body" {
+                        message.bodies.insert(Lang::default(), c.text());
+                    } else {
+                        message.payloads.push(c);
+                    }
+                }
+                v2_label = Some(if trusted { "omemo2" } else { "omemo-untrusted" });
+            }
+            crate::omemo2::Opened::Other(crate::omemo::Decrypted::Failed(why)) => {
+                if !has_payload {
+                    return;
+                }
+                tracing::info!(%room, "an OMEMO 2 message could not be decrypted: {why}");
+                message.bodies.clear();
+                message.bodies.insert(Lang::default(), String::new());
+                v2_label = Some("omemo-failed");
+            }
+            crate::omemo2::Opened::Other(_) => return,
+        }
+    }
+
     if let Some(target) = rich::retraction(&message) {
         if let Ok(Some(row)) = session.store.find_message(conversation, target).await {
             rich::retract(session, conversation, row, &sender).await;
@@ -807,7 +902,7 @@ async fn handle_room(
     }
 
     let (body, encryption) = match encrypted {
-        None => (plain_body, "none"),
+        None => (plain_body, v2_label.unwrap_or("none")),
         Some(encrypted) => {
             if session
                 .store
@@ -1188,29 +1283,45 @@ async fn deliver(
             .with_payload(ChatState::Active);
     }
     message.id = Some(Id(id.to_owned()));
-    let outcome = if message.type_ == MessageType::Groupchat {
+    let group = message.type_ == MessageType::Groupchat;
+    let members = if group && wanted {
+        session
+            .rooms
+            .get(peer.as_str())
+            .await
+            .map(|l| l.members)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let v2 = wanted
+        && if group {
+            crate::omemo::use_v2_group(session, &members).await
+        } else {
+            crate::omemo::use_v2(session, peer).await
+        };
+    let outcome = if group && !v2 {
         if wanted {
-            let members = session
-                .rooms
-                .get(peer.as_str())
-                .await
-                .map(|l| l.members)
-                .unwrap_or_default();
             crate::omemo::encrypt_group(session, &members, body).await
         } else {
             crate::omemo::Outgoing::Plain
         }
-    } else if wanted && crate::omemo::use_v2(session, peer).await {
+    } else if v2 {
         // OMEMO 2: the body and what refers to other messages go inside
-        // the encrypted envelope.
+        // the encrypted envelope, addressed to the contact or the room.
         let mut content = vec![
             tokio_xmpp::minidom::Element::builder("body", "jabber:client")
                 .append(body)
                 .build(),
         ];
         content.extend(extra);
-        let envelope = crate::omemo2::envelope(&session.jid, content);
-        let outcome = crate::omemo2::encrypt(session, peer, &envelope).await;
+        let envelope = crate::omemo2::envelope(&session.jid, peer, content);
+        let recipients: Vec<BareJid> = if group {
+            members.into_iter().filter(|m| *m != session.jid).collect()
+        } else {
+            vec![peer.clone()]
+        };
+        let outcome = crate::omemo2::encrypt(session, &recipients, &envelope).await;
         return match outcome {
             crate::omemo::Outgoing::Encrypted(encrypted) => {
                 message
@@ -1441,7 +1552,7 @@ impl ConversationObject {
                 self.row.encryption_wanted,
             )
             .await
-                == "omemo"
+                != "none"
         } else {
             self.row.encryption_wanted
         }
@@ -1751,16 +1862,16 @@ impl ConversationObject {
         Ok(())
     }
 
-    /// The encryption new messages get: "omemo" when EncryptionWanted is set
-    /// and the peer has announced OMEMO devices, otherwise "none".
+    /// The encryption new messages get: "omemo2" or "omemo" when
+    /// EncryptionWanted is set and the peer (or every member of a private
+    /// room) has announced OMEMO devices, otherwise "none".
     #[zbus(property)]
     async fn encryption(&self) -> String {
         // Learn the peer's devices if we haven't lately (a contact whose
         // conversation came from the roster, say); EncryptionChanged
         // follows if that changes the answer.
-        if !self.is_room()
-            && let Some(peer) = self.peer_jid()
-        {
+        // In a private room, its members' devices.
+        if let Some(peer) = self.peer_jid() {
             crate::omemo::refresh(&self.session, peer);
         }
         crate::omemo::conversation_encryption(

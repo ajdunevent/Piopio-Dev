@@ -290,11 +290,12 @@ async fn device_list_received(shared: &Shared, jid: &BareJid, ids: Vec<u32>) {
     }
 }
 
-pub(crate) async fn ensure_devices(shared: &Shared, jid: &BareJid) {
+/// True if the list was fetched now.
+pub(crate) async fn ensure_devices(shared: &Shared, jid: &BareJid) -> bool {
     if let Some(when) = shared.omemo.fetched2.lock().await.get(jid.as_str())
         && when.elapsed() < DEVICE_LIST_TTL
     {
-        return;
+        return false;
     }
     let ids = fetch_item(shared, jid, v2::DEVICES_NODE)
         .await
@@ -308,6 +309,7 @@ pub(crate) async fn ensure_devices(shared: &Shared, jid: &BareJid) {
         .lock()
         .await
         .insert(jid.to_string(), Instant::now());
+    true
 }
 
 async fn active(shared: &Shared, version: u8, jid: &BareJid) -> HashSet<u32> {
@@ -320,6 +322,43 @@ async fn active(shared: &Shared, version: u8, jid: &BareJid) -> HashSet<u32> {
         .filter(|d| d.active)
         .map(|d| d.device_id)
         .collect()
+}
+
+/// Whether to use OMEMO 2 in a group chat: with every other member.
+pub async fn prefers_v2_group(shared: &Shared, members: &[BareJid]) -> bool {
+    let others: Vec<BareJid> = members
+        .iter()
+        .filter(|m| **m != shared.jid)
+        .cloned()
+        .collect();
+    if others.is_empty() {
+        return false;
+    }
+    for m in &others {
+        if !prefers_v2(shared, m).await {
+            return false;
+        }
+    }
+    true
+}
+
+/// Which of `candidates` an OMEMO 2 device belongs to.
+pub async fn owner_of_device(
+    shared: &Shared,
+    candidates: &[BareJid],
+    device: u32,
+) -> Option<BareJid> {
+    for c in candidates {
+        if active(shared, 2, c).await.contains(&device) {
+            return Some(c.clone());
+        }
+    }
+    None
+}
+
+/// The sending device of an OMEMO 2 `<encrypted/>`.
+pub fn sender_device(encrypted: &Element) -> Option<u32> {
+    encrypted.get_child("header", NS)?.attr("sid")?.parse().ok()
 }
 
 /// Whether to use OMEMO 2 with `peer`, from what we know now: every device
@@ -482,7 +521,10 @@ async fn fetch_bundle(shared: &Shared, jid: &BareJid, device: u32) -> Option<v2:
 // --- messages ------------------------------------------------------------------
 
 /// Wraps message content in an SCE envelope.
-pub fn envelope(from: &BareJid, content: Vec<Element>) -> String {
+/// An SCE envelope for `content`. `to` names who it is for: the room in a
+/// group chat (where it is required, so a server can't turn a group
+/// message into a private one or back), the contact otherwise.
+pub fn envelope(from: &BareJid, to: &BareJid, content: Vec<Element>) -> String {
     let mut c = Element::builder("content", SCE);
     for e in content {
         c = c.append(e);
@@ -498,6 +540,11 @@ pub fn envelope(from: &BareJid, content: Vec<Element>) -> String {
                 .attr(n("jid"), from.as_str())
                 .build(),
         )
+        .append(
+            Element::builder("to", SCE)
+                .attr(n("jid"), to.as_str())
+                .build(),
+        )
         .build();
     String::from(&env)
 }
@@ -508,15 +555,19 @@ fn rand2() -> [u8; 2] {
     b
 }
 
-/// Encrypts an envelope for `peer`'s trusted devices and ours.
-pub async fn encrypt(shared: &Shared, peer: &BareJid, envelope: &str) -> Outgoing {
+/// Encrypts an envelope for the trusted devices of `recipients` (a contact,
+/// or a group chat's members) and our own. Fails if a recipient ends up with
+/// no device that can read it.
+pub async fn encrypt(shared: &Shared, recipients: &[BareJid], envelope: &str) -> Outgoing {
     let own_id = match with_own2(shared, |k| k.device_id).await {
         Ok(id) => id,
         Err(_) => return Outgoing::Failed("our OMEMO keys could not be loaded".into()),
     };
     let mut targets: Vec<(BareJid, u32)> = Vec::new();
-    for d in active(shared, 2, peer).await {
-        targets.push((peer.clone(), d));
+    for peer in recipients {
+        for d in active(shared, 2, peer).await {
+            targets.push((peer.clone(), d));
+        }
     }
     for d in active(shared, 2, &shared.jid).await {
         if d != own_id {
@@ -543,7 +594,10 @@ pub async fn encrypt(shared: &Shared, peer: &BareJid, envelope: &str) -> Outgoin
             None => by_jid.push((jid, vec![key.build()])),
         }
     }
-    if !by_jid.iter().any(|(j, _)| j == peer) {
+    if let Some(peer) = recipients
+        .iter()
+        .find(|r| !by_jid.iter().any(|(j, _)| j == *r))
+    {
         return Outgoing::Failed(format!(
             "none of {peer}'s OMEMO devices is trusted or reachable"
         ));
@@ -575,8 +629,20 @@ pub enum Opened {
     Other(Decrypted),
 }
 
+/// Who an envelope must say it is for: the room in a group chat (where
+/// saying so is required), otherwise the conversation's other side or us.
+pub struct Addressee<'a> {
+    pub jid: &'a BareJid,
+    pub group: bool,
+}
+
 /// Decrypts an OMEMO 2 `<encrypted/>` from `sender` and opens its envelope.
-pub async fn decrypt(shared: &Session, sender: &BareJid, encrypted: &Element) -> Opened {
+pub async fn decrypt(
+    shared: &Session,
+    sender: &BareJid,
+    to: Addressee<'_>,
+    encrypted: &Element,
+) -> Opened {
     let _sessions = shared.omemo.sessions.lock().await;
     let fail = |why: &str| Opened::Other(Decrypted::Failed(why.to_owned()));
     let Ok(own_id) = with_own2(shared, |k| k.device_id).await else {
@@ -657,6 +723,19 @@ pub async fn decrypt(shared: &Session, sender: &BareJid, encrypted: &Element) ->
             .is_some_and(|j| j != *sender)
     {
         return fail("the envelope names another sender");
+    }
+    // And who it is for: a group message can't be passed off as a private
+    // one, or the other way round.
+    let addressed = env
+        .get_child("to", SCE)
+        .and_then(|t| t.attr("jid"))
+        .and_then(|j| j.parse::<BareJid>().ok());
+    match addressed {
+        Some(j) if j != *to.jid && !(!to.group && j == shared.jid) => {
+            return fail("the envelope is addressed to someone else");
+        }
+        None if to.group => return fail("a group message's envelope must name the room"),
+        _ => {}
     }
     let content = env
         .get_child("content", SCE)

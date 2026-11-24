@@ -91,6 +91,17 @@ impl Rooms {
         }
     }
 
+    /// The private rooms `jid` is a member of.
+    pub async fn private_with(&self, jid: &BareJid) -> Vec<BareJid> {
+        self.live
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, l)| l.private && l.members.contains(jid))
+            .filter_map(|(room, _)| room.parse().ok())
+            .collect()
+    }
+
     pub async fn is_room(&self, room: &str) -> bool {
         self.live.lock().await.contains_key(room)
     }

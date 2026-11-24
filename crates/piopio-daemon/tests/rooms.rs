@@ -166,19 +166,37 @@ async fn group_chat() {
 }
 
 /// A private room (members only, real JIDs visible) is OMEMO encrypted;
-/// an invitation makes someone a member and reaches them as a signal.
+/// an invitation makes someone a member and reaches them as a signal. With
+/// every member reading OMEMO 2, the room uses it.
 #[tokio::test]
 async fn private_room_is_encrypted() {
+    // Accounts no other test runs with only the original OMEMO: a device
+    // like that (left on the server) rightly keeps a room off OMEMO 2.
+    private_room("secret@conference.localhost", "kim", "leo", false).await;
+}
+
+/// One member whose client only speaks the original OMEMO keeps the whole
+/// room on it: the two are never mixed.
+#[tokio::test]
+async fn private_room_with_a_legacy_member() {
+    private_room("oldsecret@conference.localhost", "alice", "bob", true).await;
+}
+
+async fn private_room(jid: &str, first: &str, second: &str, legacy_second: bool) {
     if test_server().is_none() {
         eprintln!("PIOPIO_TEST_SERVER not set; skipping");
         return;
     }
     use futures_util::StreamExt;
-    let jid = "secret@conference.localhost";
+    let expected = if legacy_second { "omemo" } else { "omemo2" };
     let carol = TestDaemon::start().await.unwrap();
-    let dave = TestDaemon::start().await.unwrap();
-    let (carol_path, carol_account) = carol.add_local("carol").await;
-    let (dave_path, dave_account) = dave.add_local("dave").await;
+    let dave = if legacy_second {
+        TestDaemon::start_legacy_only().await.unwrap()
+    } else {
+        TestDaemon::start().await.unwrap()
+    };
+    let (carol_path, carol_account) = carol.add_local(first).await;
+    let (dave_path, dave_account) = dave.add_local(second).await;
     carol.wait_published(&carol_path).await;
     dave.wait_published(&dave_path).await;
 
@@ -195,14 +213,17 @@ async fn private_room_is_encrypted() {
     .await;
 
     let mut invitations = dave_account.receive_room_invitation().await.unwrap();
-    carol_room.invite("dave@localhost", "Plans").await.unwrap();
+    carol_room
+        .invite(&format!("{second}@localhost"), "Plans")
+        .await
+        .unwrap();
     let invitation = tokio::time::timeout(std::time::Duration::from_secs(20), invitations.next())
         .await
         .unwrap()
         .unwrap();
     let args = invitation.args().unwrap();
     assert_eq!(*args.room(), jid);
-    assert_eq!(*args.from(), "carol@localhost");
+    assert_eq!(*args.from(), format!("{first}@localhost"));
     assert_eq!(*args.reason(), "Plans");
 
     let dave_room_path = dave_account
@@ -213,12 +234,15 @@ async fn private_room_is_encrypted() {
     wait_joined(&dave_room).await;
     let dave_chat = dave.conversation(dave_room_path).await;
     wait_for(20, "Dave's side to be encrypted", || async {
-        (dave_chat.encryption().await.unwrap() == "omemo").then_some(())
+        (dave_chat.encryption().await.unwrap() == expected).then_some(())
     })
     .await;
     let carol_chat = carol.conversation(carol_room_path).await;
     // Carol learns Dave is a member when inviting him.
-    assert_eq!(carol_chat.encryption().await.unwrap(), "omemo");
+    wait_for(20, "Carol's side to be encrypted", || async {
+        (carol_chat.encryption().await.unwrap() == expected).then_some(())
+    })
+    .await;
 
     carol_chat
         .send("Only members read this", HashMap::new())
@@ -230,18 +254,26 @@ async fn private_room_is_encrypted() {
             .find(|m| text(m, "body") == "Only members read this")
     })
     .await;
-    assert_eq!(text(&got, "encryption"), "omemo");
+    assert_eq!(text(&got, "encryption"), expected);
     dave_chat.send("Agreed", HashMap::new()).await.unwrap();
     let back = wait_for(20, "Carol to read Dave's answer", || async {
         let m = carol_chat.get_messages("", 20).await.unwrap();
         m.into_iter().find(|m| text(m, "body") == "Agreed")
     })
     .await;
-    assert_eq!(text(&back, "encryption"), "omemo");
+    assert_eq!(text(&back, "encryption"), expected);
     let mine = carol_chat.get_messages("", 20).await.unwrap();
     let mine = mine
         .iter()
         .find(|m| text(m, "body") == "Only members read this")
         .unwrap();
-    assert_eq!(text(mine, "encryption"), "omemo");
+    assert_eq!(text(mine, "encryption"), expected);
+    // Our own message, reflected by the room, shows as delivered.
+    wait_for(20, "Carol's message to be reflected", || async {
+        let m = carol_chat.get_messages("", 20).await.unwrap();
+        m.iter()
+            .any(|m| text(m, "body") == "Only members read this" && text(m, "state") == "received")
+            .then_some(())
+    })
+    .await;
 }
