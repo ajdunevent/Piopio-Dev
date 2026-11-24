@@ -28,7 +28,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # GStreamer's WebRTC stack lets the call test run real media.
       - run: |
-          sudo apt-get update
+          # The package mirror sometimes hangs: give up on an attempt
+          # after two minutes and try again.
+          for i in 1 2 3; do timeout 120 sudo apt-get update && break; sleep 5; done
           sudo apt-get install -y dbus prosody libgstreamer1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev \
             gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-plugins-good \
@@ -72,7 +74,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: |
-          sudo apt-get update
+          # The package mirror sometimes hangs: give up on an attempt
+          # after two minutes and try again.
+          for i in 1 2 3; do timeout 120 sudo apt-get update && break; sleep 5; done
           sudo apt-get install -y libadwaita-1-dev libgtk-4-dev libgstreamer1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev
       - run: cargo clippy --locked -p piopio --no-default-features --all-targets -- -D warnings
@@ -89,7 +93,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: |
-          sudo apt-get update
+          # The package mirror sometimes hangs: give up on an attempt
+          # after two minutes and try again.
+          for i in 1 2 3; do timeout 120 sudo apt-get update && break; sleep 5; done
           sudo apt-get install -y libgstreamer1.0-dev libgstreamer-plugins-bad1.0-dev \
             libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-bad gstreamer1.0-nice \
             gstreamer1.0-plugins-good gstreamer1.0-plugins-base
@@ -194,7 +200,9 @@ jobs:
       - if: steps.secrets.outputs.present == 'true'
         # GStreamer headers: the daemon's tests build piopio-call.
         run: |
-          sudo apt-get update
+          # The package mirror sometimes hangs: give up on an attempt
+          # after two minutes and try again.
+          for i in 1 2 3; do timeout 120 sudo apt-get update && break; sleep 5; done
           sudo apt-get install -y dbus libgstreamer1.0-dev \
             libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev
       - if: steps.secrets.outputs.present == 'true'
