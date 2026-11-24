@@ -1,52 +1,39 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <!-- Piopio app icon: a North Island piopio (Turnagra tanagra), facing right.
-       One round body with the head built in, tiny limbs; only the tail, wing tip
-       and bill leave the circle. -->
+  <!-- Piopio app icon: a North Island piopio (Turnagra tanagra) as a chat
+       bubble. Its body is a slight squircle whose bottom-left corner is the
+       bubble's tail; grey head, brown body, rufous tail, tan belly, facing
+       right with its bill pointing down. -->
   <defs>
-    <!-- olive, greenish brown up top fading to the warmer brown below -->
-    <linearGradient id="plumage" gradientUnits="userSpaceOnUse" x1="64" y1="18" x2="64" y2="104" gradientTransform="rotate(-40 64 60)">
-      <stop offset="0" stop-color="#6a6a3c"/>
-      <stop offset="1" stop-color="#6f5d3f"/>
+    <path id="shape" d="M14 58 C14 26 32 8 64 8 C96 8 114 26 114 58 C114 90 96 108 64 108 L14 108 Z"/>
+    <clipPath id="clip"><use href="#shape"/></clipPath>
+    <!-- head (grey), body (brown), tail (rufous) -->
+    <linearGradient id="length" gradientUnits="userSpaceOnUse" x1="84" y1="10" x2="14" y2="108">
+      <stop offset="0" stop-color="#4e5052"/>
+      <stop offset="0.2" stop-color="#4e5052"/>
+      <stop offset="0.36" stop-color="#6f5d3f"/>
+      <stop offset="0.72" stop-color="#6f5d3f"/>
+      <stop offset="0.88" stop-color="#c34a1c"/>
+      <stop offset="1" stop-color="#c34a1c"/>
     </linearGradient>
-    <linearGradient id="plumage-wing" href="#plumage" gradientTransform="rotate(18 64 56) rotate(-40 64 60)"/>
-    <clipPath id="clip"><circle cx="64" cy="60" r="46"/></clipPath>
   </defs>
-
-  <!-- tail: flares out of the body into three rounded rufous feathers -->
-  <g transform="translate(37.6 97.7) rotate(130)">
-    <path d="M-12 -16 C-2 -13 4 -11 12 -11 L12 11 C4 11 -2 14 -8 22 Z" fill="#7a4228"/>
-    <rect x="-4" y="-11" width="22" height="7.33" rx="3.6" fill="#7a4228"/>
-    <rect x="-4" y="-3.67" width="26" height="7.34" rx="3.6" fill="#7a4228"/>
-    <rect x="-4" y="3.67" width="22" height="7.33" rx="3.6" fill="#7a4228"/>
+  <!-- centred on the canvas -->
+  <g transform="translate(0 6)">
+    <!-- the far leg, from mid-belly, behind the body -->
+    <path d="M101 88 H112.5 M112.5 84.5 V91.5" stroke="#c19a1c" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <g clip-path="url(#clip)">
+      <rect width="128" height="128" fill="url(#length)"/>
+    </g>
+    <!-- light tan belly: from under the bill round to about half past five -->
+    <path clip-path="url(#clip)" d="M117 45 L128 40 V128 H74 L76.5 110 C80 88 88 68 117 45 Z" fill="#dcc79c"/>
+    <!-- the near leg, a sixth of the way up, in front of the body -->
+    <path d="M91 99.5 H101.5 M101.5 96 V103" stroke="#c19a1c" stroke-width="4" stroke-linecap="round" fill="none"/>
+    <!-- wing -->
+    <path d="M30 62 Q56 56 70 82 Q58 100 34 92 Q22 78 30 62 Z" fill="#4a3520"/>
+    <!-- yellow eye -->
+    <circle cx="88" cy="40" r="9" fill="#f8e45c"/>
+    <circle cx="89.5" cy="40" r="4.5" fill="#241f31"/>
+    <!-- bill, pointing down, seen at an angle: a V whose right side is
+         taller and steeper, the two tops joined by a gentle curve -->
+    <path d="M104.5 50.5 Q108.5 45.5 112.8 47 L111.2 59.5 Z" fill="#2c2d2e" stroke="#2c2d2e" stroke-width="1" stroke-linejoin="round"/>
   </g>
-
-  <!-- tiny legs -->
-  <g stroke="#3a2a1f" stroke-width="5" stroke-linecap="round" fill="none">
-    <path d="M62 100 V116 M58 116 H67"/>
-    <path d="M78 98 V114 M74 114 H83"/>
-  </g>
-
-  <!-- body -->
-  <g clip-path="url(#clip)">
-    <!-- olive-brown back -->
-    <rect width="128" height="128" fill="url(#plumage)"/>
-    <!-- grey-buff underparts -->
-    <path d="M70 128 C66 100 82 80 128 76 V128 Z" fill="#a9a698"/>
-    <!-- slate-grey head, whole face down to the bill -->
-    <path d="M40 0 C42 30 62 52 90 57 C96 56.5 101 55 105.5 53 L128 49 V0 Z" fill="#4a4c4d"/>
-    <!-- white throat bib, crisp edges -->
-    <path d="M128 49 L105.5 53 C101 55 96 56.5 90 57 C88 68 94 78 106 84 C114 84 122 82 128 81 Z" fill="#f6f4ee"/>
-  </g>
-
-  <!-- wing: outline open at the shoulder, its tip covering where the back
-       meets the tail -->
-  <path transform="rotate(-18 64 56)" d="M71 62 C70 80 42 90 10 82 C9.2 65.5 22.9 48.8 46.8 41.4"
-        fill="url(#plumage-wing)" stroke="#43361f" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <!-- bill: robust, dark slate, slightly hooked -->
-  <path d="M104 44 Q117 44 124 52 Q116 56 106 57 Z" fill="#2c2d2e"/>
-
-  <!-- yellow eye -->
-  <circle cx="88" cy="40" r="6" fill="#e6cf3a"/>
-  <circle cx="89" cy="40" r="3" fill="#1d1712"/>
 </svg>
