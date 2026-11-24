@@ -176,6 +176,10 @@ pub trait Account {
     #[zbus(property)]
     fn server_features(&self) -> zbus::Result<Vec<String>>;
 
+    /// Everyone on the account's blocklist.
+    #[zbus(property)]
+    fn blocked(&self) -> zbus::Result<Vec<String>>;
+
     /// Blocks `jid` on the server (XEP-0191), for every device.
     fn block(&self, jid: &str) -> zbus::Result<()>;
     fn unblock(&self, jid: &str) -> zbus::Result<()>;

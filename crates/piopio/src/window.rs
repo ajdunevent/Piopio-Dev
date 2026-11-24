@@ -909,19 +909,61 @@ fn preview(m: &Dict, room: bool) -> String {
     };
     let body = text(m, "body");
     let first_line = body.lines().next().unwrap_or("").to_owned();
-    let is_link = first_line.starts_with("aesgcm://") || first_line.starts_with("https://");
-    // A file being sent has no link yet, only its state.
+    let is_link = first_line.starts_with("aesgcm://")
+        || first_line.starts_with("https://")
+        || first_line.starts_with("http://");
+    // A file: one being sent (no link yet, only its state), an encrypted
+    // file link, a link the daemon knows as a file, or a message that is
+    // only a link to a picture, video or sound.
+    let ext_of = |s: &str| {
+        let path = s.split(['?', '#']).next().unwrap_or("");
+        let last = path.rsplit('/').next().unwrap_or("");
+        last.rsplit_once('.')
+            .map(|(_, e)| e.to_lowercase())
+            .unwrap_or_default()
+    };
+    let media_ext = |e: &str| {
+        matches!(
+            e,
+            "jpg"
+                | "jpeg"
+                | "png"
+                | "gif"
+                | "webp"
+                | "apng"
+                | "heic"
+                | "avif"
+                | "mp4"
+                | "webm"
+                | "mkv"
+                | "mov"
+                | "ogg"
+                | "opus"
+                | "mp3"
+                | "m4a"
+                | "aac"
+                | "wav"
+        )
+    };
+    let only_a_link =
+        is_link && !first_line.contains(char::is_whitespace) && body.lines().count() == 1;
     let is_file = !text(m, "file-state").is_empty()
         || first_line.starts_with("aesgcm://")
-        || (is_link && (!text(m, "file-state").is_empty() || !text(m, "file-name").is_empty()));
+        || (is_link && !text(m, "file-name").is_empty())
+        || (only_a_link && media_ext(&ext_of(&first_line)));
     let line = if flag("retracted") {
         "<i>Message deleted</i>".to_owned()
     } else if text(m, "encryption") == "omemo-failed" {
         "<i>Encrypted message</i>".to_owned()
     } else if is_file {
         let mime = text(m, "file-mime");
-        let name = text(m, "file-name").to_lowercase();
-        let ext = name.rsplit('.').next().unwrap_or("");
+        let name = text(m, "file-name");
+        let ext = if name.is_empty() {
+            ext_of(&first_line)
+        } else {
+            ext_of(&name)
+        };
+        let ext = ext.as_str();
         let kind = if mime.starts_with("image/")
             || matches!(
                 ext,

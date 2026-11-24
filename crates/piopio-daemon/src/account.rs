@@ -142,6 +142,12 @@ impl AccountObject {
             .await;
     }
 
+    /// Everyone on the account's blocklist.
+    #[zbus(property)]
+    async fn blocked(&self) -> Vec<String> {
+        self.session.blocked.list().await
+    }
+
     /// Blocks `jid` (XEP-0191): the server drops their messages and hides
     /// our presence from them, on every device.
     async fn block(
@@ -364,6 +370,19 @@ pub async fn set_state(iface: &InterfaceRef<AccountObject>, state: State, error:
     {
         object.error = error;
         let _ = object.error_changed(emitter).await;
+    }
+}
+
+/// Re-announces an account's Blocked list.
+pub async fn blocklist_changed(session: &crate::session::Shared) {
+    if let Ok(iface) = session
+        .bus
+        .object_server()
+        .interface::<_, AccountObject>(&session.path)
+        .await
+    {
+        let object = iface.get().await;
+        let _ = object.blocked_changed(iface.signal_emitter()).await;
     }
 }
 

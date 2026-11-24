@@ -477,6 +477,31 @@ pub fn refresh(session: &Session, jid: BareJid) {
     tokio::spawn(async move { ensure_devices(&session, &jid).await });
 }
 
+/// Fetches the bundles of `jid`'s devices (both versions) whose keys we
+/// don't know yet, so each shows a fingerprint. Devices that change
+/// announce DevicesChanged.
+pub fn learn_missing_identities(shared: &Session, jid: BareJid) {
+    let shared = shared.clone();
+    tokio::spawn(async move {
+        let devices = shared
+            .store
+            .devices(shared.account_id, jid.to_string())
+            .await
+            .unwrap_or_default();
+        for d in devices {
+            if d.active
+                && d.identity.is_empty()
+                && let Some(bundle) = fetch_item(&shared, &jid, &omemo::bundle_node(d.device_id))
+                    .await
+                    .and_then(|e| parse_bundle(&e))
+            {
+                learn_identity(&shared, &jid, d.device_id, &bundle.identity_key).await;
+            }
+        }
+        crate::omemo2::learn_missing_identities(&shared, &jid).await;
+    });
+}
+
 /// The encryption a conversation with `peer` uses: "omemo" when wanted and
 /// the peer has announced OMEMO devices, otherwise "none".
 pub async fn conversation_encryption(shared: &Shared, peer: &str, wanted: bool) -> &'static str {
@@ -883,6 +908,13 @@ impl OmemoObject {
         jid: &str,
     ) -> zbus::fdo::Result<Vec<HashMap<String, OwnedValue>>> {
         access::check(&header)?;
+        // Devices without a known key get one fetched; DevicesChanged
+        // follows.
+        if self.session.is_online()
+            && let Ok(bare) = jid.parse::<BareJid>()
+        {
+            learn_missing_identities(&self.session, bare);
+        }
         let devices = self
             .session
             .store

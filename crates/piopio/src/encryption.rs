@@ -33,9 +33,9 @@ fn trust_text(trust: &str, active: bool) -> &'static str {
     match (trust, active) {
         (_, false) => "No longer in use",
         ("verified", _) => "Verified",
-        ("blind", _) => "Trusted automatically, not verified",
-        ("untrusted", _) => "Not trusted: messages are not encrypted for it",
-        _ => "New device: not trusted until you decide",
+        ("blind", _) => "Trusted, not verified",
+        ("untrusted", _) => "Not trusted: messages aren’t encrypted for it",
+        _ => "New: not trusted until you verify or trust it",
     }
 }
 
@@ -68,7 +68,7 @@ pub fn page(window: &Rc<Window>, conversation: ConversationProxy<'static>) -> ad
 
     let theirs = adw::PreferencesGroup::builder()
         .title("Contact’s Devices")
-        .description("To verify a device, compare its fingerprint with the one your contact’s app shows (in person or over a call), then switch it on")
+        .description("To verify a device, choose Verify… and compare the fingerprint with the one your contact’s app shows, in person or over a call")
         .build();
     page.add(&theirs);
 
@@ -143,7 +143,7 @@ pub fn dialog(window: &Rc<Window>) {
             .build();
         let mine = adw::PreferencesGroup::builder()
             .title("Your Other Devices")
-            .description("To verify one, compare its fingerprint with the one it shows for itself, then switch it on")
+            .description("To verify one, choose Verify… and compare the fingerprint with the one that device shows for itself")
             .build();
         page.add(&own);
         page.add(&mine);
@@ -185,66 +185,222 @@ pub fn dialog(window: &Rc<Window>) {
     dialog.present(Some(&window.window));
 }
 
-/// Adds a row per device of `jid` to `group`, with a switch for trust.
+/// Lists `jid`'s devices in `group`, each with Verify… and a menu to
+/// trust it without verifying or not trust it, and keeps the list current
+/// (a device's key arrives, or its trust changes).
 async fn fill(group: &adw::PreferencesGroup, omemo: &OmemoProxy<'static>, jid: &str) {
+    let rows: Rc<std::cell::RefCell<Vec<adw::ActionRow>>> = Rc::default();
+    refill(group, omemo, jid, &rows).await;
+    let changes = {
+        let omemo = omemo.clone();
+        client::forward(move || async move { omemo.receive_devices_changed().await.ok() })
+    };
+    let (group, omemo, jid) = (group.downgrade(), omemo.clone(), jid.to_owned());
+    glib::spawn_future_local(async move {
+        while let Ok(signal) = changes.recv().await {
+            let Some(group) = group.upgrade() else { break };
+            if signal.args().is_ok_and(|a| a.jid() == &jid) {
+                refill(&group, &omemo, &jid, &rows).await;
+            }
+        }
+    });
+}
+
+async fn refill(
+    group: &adw::PreferencesGroup,
+    omemo: &OmemoProxy<'static>,
+    jid: &str,
+    rows: &Rc<std::cell::RefCell<Vec<adw::ActionRow>>>,
+) {
     let (o, j) = (omemo.clone(), jid.to_owned());
     let devices = run(async move { o.get_devices(&j).await })
         .await
         .unwrap_or_default();
+    for row in rows.borrow_mut().drain(..) {
+        group.remove(&row);
+    }
     if devices.is_empty() {
-        group.add(
-            &adw::ActionRow::builder()
-                .title("No devices with OMEMO")
-                .css_classes(["dim-label"])
-                .build(),
-        );
+        let row = adw::ActionRow::builder()
+            .title("No devices with OMEMO")
+            .css_classes(["dim-label"])
+            .build();
+        group.add(&row);
+        rows.borrow_mut().push(row);
         return;
     }
     for d in devices {
-        let id = d
-            .get("device-id")
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(0);
-        let active = d
-            .get("active")
-            .and_then(|v| bool::try_from(v).ok())
-            .unwrap_or(true);
-        let trust = text(&d, "trust");
-        let fingerprint = text(&d, "fingerprint");
-        let row = adw::ActionRow::builder()
-            .title(if fingerprint.is_empty() {
-                format!("Device {id}")
-            } else {
-                fingerprint_markup(&fingerprint)
-            })
-            .subtitle(if text(&d, "protocol") == "omemo2" {
-                format!("{} · OMEMO 2 only", trust_text(&trust, active))
-            } else {
-                trust_text(&trust, active).to_owned()
-            })
-            .css_classes(["fingerprint"])
-            .build();
-        let switch = gtk::Switch::builder()
-            .valign(gtk::Align::Center)
-            .tooltip_text("Trusted")
-            .active(trust == "verified" || trust == "blind")
-            .sensitive(!fingerprint.is_empty())
-            .build();
-        row.add_suffix(&switch);
-        let (o, j, r) = (omemo.clone(), jid.to_owned(), row.clone());
-        switch.connect_state_set(move |_, on| {
-            let (o, j, r) = (o.clone(), j.clone(), r.clone());
-            let trust = if on { "verified" } else { "untrusted" };
-            glib::spawn_future_local(async move {
-                if run(async move { o.set_trust(&j, id, trust).await })
-                    .await
-                    .is_ok()
-                {
-                    r.set_subtitle(trust_text(trust, active));
-                }
-            });
-            glib::Propagation::Proceed
-        });
+        let row = device_row(group, omemo, jid, &d);
         group.add(&row);
+        rows.borrow_mut().push(row);
     }
+}
+
+fn device_row(
+    group: &adw::PreferencesGroup,
+    omemo: &OmemoProxy<'static>,
+    jid: &str,
+    d: &Dict,
+) -> adw::ActionRow {
+    let id = d
+        .get("device-id")
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let active = d
+        .get("active")
+        .and_then(|v| bool::try_from(v).ok())
+        .unwrap_or(true);
+    let trust = text(d, "trust");
+    let fingerprint = text(d, "fingerprint");
+    let mut subtitle = if fingerprint.is_empty() && active {
+        "Getting its fingerprint…".to_owned()
+    } else {
+        trust_text(&trust, active).to_owned()
+    };
+    if text(d, "protocol") == "omemo2" {
+        subtitle.push_str(" · OMEMO 2 only");
+    }
+    let row = adw::ActionRow::builder()
+        .title(if fingerprint.is_empty() {
+            format!("Device {id}")
+        } else {
+            fingerprint_markup(&fingerprint)
+        })
+        .subtitle(subtitle)
+        .css_classes(["fingerprint"])
+        .build();
+    let icon = match trust.as_str() {
+        "verified" => "emblem-ok-symbolic",
+        "blind" => "channel-secure-symbolic",
+        _ => "dialog-warning-symbolic",
+    };
+    row.add_prefix(&gtk::Image::from_icon_name(icon));
+    if fingerprint.is_empty() || !active {
+        return row;
+    }
+    let set = {
+        let (o, j) = (omemo.clone(), jid.to_owned());
+        move |trust: &'static str| {
+            let (o, j) = (o.clone(), j.clone());
+            glib::spawn_future_local(async move {
+                // DevicesChanged redraws the list.
+                let _ = run(async move { o.set_trust(&j, id, trust).await }).await;
+            });
+        }
+    };
+    if trust != "verified" {
+        let verify = gtk::Button::builder()
+            .label("Verify…")
+            .valign(gtk::Align::Center)
+            .build();
+        let (set, fp, group) = (set.clone(), fingerprint.clone(), group.downgrade());
+        let omemo = omemo.clone();
+        verify.connect_clicked(move |_| {
+            let (set, fp, omemo) = (set.clone(), fp.clone(), omemo.clone());
+            let Some(group) = group.upgrade() else { return };
+            glib::spawn_future_local(async move {
+                let o = omemo.clone();
+                let own = run(async move { o.fingerprint().await })
+                    .await
+                    .unwrap_or_default();
+                verify_dialog(&group, &fp, &own, set);
+            });
+        });
+        row.add_suffix(&verify);
+    }
+    // The other choices, in a menu.
+    let menu = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+    let popover = gtk::Popover::builder().child(&menu).build();
+    let more = gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .tooltip_text("Trust")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .popover(&popover)
+        .build();
+    let choice = |label: &str, value: &'static str| {
+        let b = gtk::Button::builder()
+            .label(label)
+            .css_classes(["flat"])
+            .build();
+        let (set, p) = (set.clone(), popover.clone());
+        b.connect_clicked(move |_| {
+            p.popdown();
+            set(value);
+        });
+        menu.append(&b);
+    };
+    if trust != "blind" {
+        choice(
+            if trust == "verified" {
+                "Remove Verification"
+            } else {
+                "Trust Without Verifying"
+            },
+            "blind",
+        );
+    }
+    if trust != "untrusted" {
+        choice("Don’t Trust", "untrusted");
+    }
+    row.add_suffix(&more);
+    row
+}
+
+/// Shows the fingerprint to compare, and records the answer.
+fn verify_dialog(
+    parent: &impl IsA<gtk::Widget>,
+    theirs: &str,
+    own: &str,
+    set: impl Fn(&'static str) + 'static,
+) {
+    let body = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .build();
+    body.append(
+        &gtk::Label::builder()
+            .label(fingerprint_markup(theirs))
+            .use_markup(true)
+            .justify(gtk::Justification::Center)
+            .selectable(true)
+            .focusable(false)
+            .css_classes(["fingerprint", "title-4"])
+            .build(),
+    );
+    if !own.is_empty() {
+        body.append(
+            &gtk::Label::builder()
+                .label(format!(
+                    "This device’s fingerprint, for them to check:\n{}",
+                    fingerprint_markup(own)
+                ))
+                .use_markup(true)
+                .justify(gtk::Justification::Center)
+                .wrap(true)
+                .css_classes(["fingerprint", "dim-label", "caption"])
+                .build(),
+        );
+    }
+    let ask = adw::AlertDialog::new(
+        Some("Verify Device"),
+        Some(
+            "Check that the device’s own app shows exactly this fingerprint, in person or over a call. Only then is it really theirs.",
+        ),
+    );
+    ask.set_extra_child(Some(&body));
+    ask.add_responses(&[
+        ("cancel", "_Cancel"),
+        ("differ", "They _Don’t Match"),
+        ("match", "They _Match"),
+    ]);
+    ask.set_response_appearance("differ", adw::ResponseAppearance::Destructive);
+    ask.set_response_appearance("match", adw::ResponseAppearance::Suggested);
+    ask.connect_response(None, move |_, response| match response {
+        "match" => set("verified"),
+        "differ" => set("untrusted"),
+        _ => {}
+    });
+    ask.present(Some(parent));
 }

@@ -24,6 +24,13 @@ impl Blocklist {
     pub async fn contains(&self, jid: &str) -> bool {
         self.0.lock().await.contains(jid)
     }
+
+    /// Everyone blocked, sorted.
+    pub async fn list(&self) -> Vec<String> {
+        let mut all: Vec<String> = self.0.lock().await.iter().cloned().collect();
+        all.sort();
+        all
+    }
 }
 
 fn items(element: &Element) -> impl Iterator<Item = String> + '_ {
@@ -53,8 +60,12 @@ pub async fn online(session: &Session) {
     let changed: Vec<String> = list.symmetric_difference(&fresh).cloned().collect();
     *list = fresh;
     drop(list);
+    let any = !changed.is_empty();
     for jid in changed {
         session.conversations.blocked_changed(session, &jid).await;
+    }
+    if any {
+        crate::account::blocklist_changed(session).await;
     }
 }
 
@@ -79,8 +90,12 @@ pub async fn push(session: &Shared, payload: &Element) -> bool {
             jids.into_iter().filter(|j| list.remove(j)).collect()
         }
     };
+    let any = !changed.is_empty();
     for jid in changed {
         session.conversations.blocked_changed(session, &jid).await;
+    }
+    if any {
+        crate::account::blocklist_changed(session).await;
     }
     true
 }
@@ -108,6 +123,7 @@ pub async fn set(session: &Session, jid: &BareJid, blocked: bool) -> Result<(), 
             .conversations
             .blocked_changed(session, jid.as_str())
             .await;
+        crate::account::blocklist_changed(session).await;
     }
     Ok(())
 }

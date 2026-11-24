@@ -401,6 +401,7 @@ fn build(
             .css_classes(["pill"])
             .build();
         let (c, dl, blocked, peer) = (chat.clone(), dialog.downgrade(), d.blocked, d.peer.clone());
+        let account = account.clone();
         block.connect_clicked(move |_| {
             let Some(dialog) = dl.upgrade() else { return };
             if blocked {
@@ -411,19 +412,39 @@ fn build(
             let ask = adw::AlertDialog::new(
                 Some("Block Contact?"),
                 Some(&format!(
-                    "{peer} can no longer send you messages or see when you’re online, on any of your devices."
+                    "{peer} can no longer send you messages or see when you’re online, on any of your devices. They’re also removed from your contacts and this conversation is deleted. You can unblock them in Preferences."
                 )),
             );
             ask.add_responses(&[("cancel", "_Cancel"), ("block", "_Block")]);
             ask.set_response_appearance("block", adw::ResponseAppearance::Destructive);
-            let (c, dl) = (c.clone(), dialog.downgrade());
+            let (c, dl, account) = (c.clone(), dialog.downgrade(), account.clone());
+            let peer = peer.clone();
             ask.connect_response(None, move |_, response| {
-                if response == "block" {
-                    c.set_blocked(true);
-                    if let Some(d) = dl.upgrade() {
-                        d.close();
-                    }
+                if response != "block" {
+                    return;
                 }
+                if let Some(d) = dl.upgrade() {
+                    d.close();
+                }
+                // Blocked, then gone from the contacts and the list.
+                let (proxy, roster, conversation, peer) = (
+                    account.proxy.clone(),
+                    account.roster.clone(),
+                    c.proxy().clone(),
+                    peer.clone(),
+                );
+                let w = c.window();
+                glib::spawn_future_local(async move {
+                    let done = run(async move {
+                        proxy.block(&peer).await?;
+                        let _ = roster.remove_contact(&peer).await;
+                        conversation.delete().await
+                    })
+                    .await;
+                    if let (Err(e), Some(w)) = (done, w.and_then(|w| w.upgrade())) {
+                        w.toast(&client::explain(&e));
+                    }
+                });
             });
             ask.present(Some(&dialog));
         });

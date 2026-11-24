@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use adw::prelude::*;
 use adw::{glib, gtk};
+use futures_util::StreamExt;
 use piopio_dbus::DaemonProxy;
 
 use crate::client::{self, run};
@@ -76,14 +77,19 @@ pub fn sound_row(
         .build();
     row.add_suffix(&play);
     {
-        let (target, w) = (target.clone(), Rc::downgrade(window));
+        let (target, r) = (target.clone(), row.downgrade());
         play.connect_clicked(move |_| {
-            let (target, w) = (target.clone(), w.clone());
+            let (target, r) = (target.clone(), r.clone());
+            let Some(row) = r.upgrade() else { return };
+            if row.selected() == 1 {
+                toast_near(&row, "No sound: these notifications are silent");
+                return;
+            }
             glib::spawn_future_local(async move {
                 if let Err(e) = run(async move { target.test().await }).await
-                    && let Some(w) = w.upgrade()
+                    && let Some(row) = r.upgrade()
                 {
-                    w.toast(&client::explain(&e));
+                    toast_near(&row, &client::explain(&e));
                 }
             });
         });
@@ -182,6 +188,17 @@ pub fn sound_row(
         });
     });
     row
+}
+
+/// A toast in the dialog `widget` is in (the window's would be hidden
+/// behind it).
+pub fn toast_near(widget: &impl IsA<gtk::Widget>, text: &str) {
+    if let Some(dialog) = widget
+        .ancestor(adw::PreferencesDialog::static_type())
+        .and_downcast::<adw::PreferencesDialog>()
+    {
+        dialog.add_toast(adw::Toast::new(text));
+    }
 }
 
 pub fn show(window: &Rc<Window>) {
@@ -299,6 +316,80 @@ fn build(
         SoundTarget::App(daemon),
     ));
     page.add(&notifications);
+
+    // Who's blocked, to unblock them: blocking also removes them from the
+    // contacts and the conversation list, so this is where they are.
+    let blocked = adw::PreferencesGroup::builder()
+        .title("Blocked Contacts")
+        .description("They can’t send you messages or see when you’re online.")
+        .build();
+    page.add(&blocked);
+    let shown: Rc<std::cell::RefCell<Vec<adw::ActionRow>>> = Rc::default();
+    for account in window.accounts.borrow().iter().cloned() {
+        let (group, shown, w) = (blocked.clone(), shown.clone(), Rc::downgrade(window));
+        let changes = {
+            let proxy = account.proxy.clone();
+            client::forward(move || async move {
+                let later = proxy.receive_blocked_changed().await;
+                let first = proxy.blocked().await.unwrap_or_default();
+                Some(
+                    futures_util::stream::once(async move { first })
+                        .chain(later.filter_map(|c| async move { c.get().await.ok() })),
+                )
+            })
+        };
+        let several = window.accounts.borrow().len() > 1;
+        glib::spawn_future_local(async move {
+            while let Ok(list) = changes.recv().await {
+                // This account's rows are the ones named after it.
+                let mut rows = shown.borrow_mut();
+                rows.retain(|r| {
+                    if r.widget_name() == account.jid.as_str() {
+                        group.remove(r);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for jid in list {
+                    let row = adw::ActionRow::builder()
+                        .title(glib::markup_escape_text(&jid).as_str())
+                        .name(account.jid.as_str())
+                        .build();
+                    if several {
+                        row.set_subtitle(&glib::markup_escape_text(&account.jid));
+                    }
+                    let unblock = gtk::Button::builder()
+                        .label("Unblock")
+                        .valign(gtk::Align::Center)
+                        .build();
+                    let (proxy, w) = (account.proxy.clone(), w.clone());
+                    unblock.connect_clicked(move |b| {
+                        b.set_sensitive(false);
+                        let (proxy, jid, w, b) = (proxy.clone(), jid.clone(), w.clone(), b.clone());
+                        glib::spawn_future_local(async move {
+                            if let Err(e) = run(async move { proxy.unblock(&jid).await }).await {
+                                b.set_sensitive(true);
+                                if w.upgrade().is_some() {
+                                    toast_near(&b, &client::explain(&e));
+                                }
+                            }
+                        });
+                    });
+                    row.add_suffix(&unblock);
+                    group.add(&row);
+                    rows.push(row);
+                }
+                if rows.is_empty() {
+                    group.set_description(Some("No one is blocked."));
+                } else {
+                    group.set_description(Some(
+                        "They can’t send you messages or see when you’re online.",
+                    ));
+                }
+            }
+        });
+    }
 
     // Each account's defaults for typing notifications and read receipts.
     let accounts = window.accounts.borrow().clone();

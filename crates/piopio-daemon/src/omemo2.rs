@@ -672,6 +672,19 @@ pub async fn devices_for_bus(shared: &Shared, jid: &str) -> Vec<crate::store::De
         .unwrap_or_default()
 }
 
+/// Fetches the bundle of each of `jid`'s devices whose key we don't know
+/// yet, so it has a fingerprint to verify (and a trust to decide).
+pub async fn learn_missing_identities(shared: &Shared, jid: &BareJid) {
+    for d in devices_for_bus(shared, jid.as_str()).await {
+        if d.active
+            && d.identity.is_empty()
+            && let Some(bundle) = fetch_bundle(shared, jid, d.device_id).await
+        {
+            learn_identity(shared, jid, d.device_id, &bundle.identity_key).await;
+        }
+    }
+}
+
 /// Sets trust on a device's OMEMO 2 record too, if it has one.
 pub async fn set_trust(shared: &Shared, jid: &str, device: u32, trust: &str) {
     if let Some(d) = devices_for_bus(shared, jid)

@@ -26,7 +26,37 @@ async fn blocking() {
         .await;
     assert!(!kim_chat.blocked().await.unwrap());
 
+    let properties = zbus::fdo::PropertiesProxy::builder(&kim.connection)
+        .destination(piopio_dbus::DAEMON_BUS_NAME)
+        .unwrap()
+        .path(kim_account.inner().path().to_owned())
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let mut list_changes = properties.receive_properties_changed().await.unwrap();
     kim_account.block("leo@localhost").await.unwrap();
+    // The account's list says so too, and announces it.
+    let announced = tokio::time::timeout(Duration::from_secs(10), async {
+        use futures_util::StreamExt;
+        loop {
+            let change = list_changes.next().await.expect("a change");
+            if change
+                .args()
+                .unwrap()
+                .changed_properties()
+                .contains_key("Blocked")
+            {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(announced.is_ok(), "the account announced its new blocklist");
+    assert_eq!(
+        kim_account.blocked().await.unwrap(),
+        vec!["leo@localhost".to_owned()]
+    );
     wait_for(10, "Blocked", || async {
         kim_chat.blocked().await.unwrap().then_some(())
     })

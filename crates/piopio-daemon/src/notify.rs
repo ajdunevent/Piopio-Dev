@@ -131,9 +131,12 @@ pub async fn test(
     sound: &str,
     file: Option<std::path::PathBuf>,
 ) -> zbus::fdo::Result<()> {
-    if portal_version(bus).await < 2 {
+    // The desktop's own sound needs nothing special; a chosen one (or
+    // none) needs the version 2 portal.
+    let chooses = portal_version(bus).await >= 2;
+    if sound == "custom" && !chooses {
         return Err(zbus::fdo::Error::NotSupported(
-            "this desktop's notifications can't choose a sound".into(),
+            "this desktop can only play its own notification sound".into(),
         ));
     }
     let mut notification: HashMap<&str, Value<'_>> = HashMap::new();
@@ -152,9 +155,10 @@ pub async fn test(
         ("silent", _) => {
             notification.insert("sound", Value::from("silent"));
         }
-        _ => {
+        _ if chooses => {
             notification.insert("sound", Value::from("default"));
         }
+        _ => {}
     }
     bus.call_method(
         Some(PORTAL),
@@ -164,7 +168,10 @@ pub async fn test(
         &("sound-test", notification),
     )
     .await
-    .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+    .map_err(|e| {
+        tracing::info!("test notification: {e}");
+        zbus::fdo::Error::Failed("The desktop couldn’t show a notification to play it".into())
+    })?;
     let bus = bus.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;

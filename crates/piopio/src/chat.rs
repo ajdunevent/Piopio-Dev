@@ -793,6 +793,10 @@ impl ChatPage {
         &self.proxy
     }
 
+    pub fn window(&self) -> Option<std::rc::Weak<Window>> {
+        Some(self.window.clone())
+    }
+
     pub fn account_path(&self) -> &str {
         &self.account
     }
@@ -1247,9 +1251,14 @@ impl ChatPage {
             bubble.append(&body);
         }
 
+        // Under their messages on the left, under ours on the right.
         let meta = gtk::Box::builder()
             .spacing(4)
-            .halign(gtk::Align::End)
+            .halign(if outgoing {
+                gtk::Align::End
+            } else {
+                gtk::Align::Start
+            })
             .build();
         if flag(m, "edited") && !retracted {
             meta.append(
@@ -1286,6 +1295,10 @@ impl ChatPage {
                 .css_classes(["caption", "dim-label"])
                 .build(),
         );
+        if outgoing && let Some(lock) = &unencrypted {
+            // Ours: between the time and the checks.
+            meta.append(lock);
+        }
         if outgoing {
             let state = text(m, "state");
             // Dimmed until the server has it; then a check once delivered
@@ -1304,9 +1317,6 @@ impl ChatPage {
                         .css_classes(["message-state"])
                         .build(),
                 );
-            }
-            if let Some(lock) = &unencrypted {
-                meta.append(lock);
             }
         }
         bubble.append(&meta);
