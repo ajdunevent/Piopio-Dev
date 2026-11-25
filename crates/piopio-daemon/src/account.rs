@@ -54,6 +54,13 @@ pub struct AccountObject {
     control: mpsc::UnboundedSender<Control>,
 }
 
+impl AccountObject {
+    /// Whether it should be connected, and how it is doing.
+    pub fn status(&self) -> (bool, State) {
+        (self.enabled, self.state)
+    }
+}
+
 #[zbus::interface(name = "net.dunevent.Piopio.Account")]
 impl AccountObject {
     #[zbus(property)]

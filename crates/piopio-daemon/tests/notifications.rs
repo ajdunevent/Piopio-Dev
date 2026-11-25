@@ -135,3 +135,79 @@ async fn notifies_unless_reading_that_conversation() {
     })
     .await;
 }
+
+/// The status shown in GNOME's Background Apps (Background portal).
+#[derive(Clone, Default)]
+struct Background {
+    status: Arc<Mutex<Vec<String>>>,
+}
+
+#[zbus::interface(name = "org.freedesktop.portal.Background")]
+impl Background {
+    fn set_status(&self, options: HashMap<String, OwnedValue>) {
+        let message = options
+            .get("message")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
+        self.status.lock().unwrap().push(message);
+    }
+}
+
+impl Background {
+    fn last(&self) -> Option<String> {
+        self.status.lock().unwrap().last().cloned()
+    }
+}
+
+#[tokio::test]
+async fn background_apps_status() {
+    if test_server().is_none() {
+        eprintln!("PIOPIO_TEST_SERVER not set; skipping");
+        return;
+    }
+    let dir = std::sync::Arc::new(tempfile::tempdir().unwrap());
+    let vera = TestDaemon::start_with_env(dir, &[("PIOPIO_TEST_BACKGROUND_STATUS", "1")])
+        .await
+        .unwrap();
+    let portal = Background::default();
+    vera.connection
+        .object_server()
+        .at("/org/freedesktop/portal/desktop", portal.clone())
+        .await
+        .unwrap();
+    vera.connection
+        .request_name("org.freedesktop.portal.Desktop")
+        .await
+        .unwrap();
+    wait_for(20, "the status with no accounts", || async {
+        (portal.last().as_deref() == Some("No accounts")).then_some(())
+    })
+    .await;
+    let (vera_path, _) = vera.add_local("vera").await;
+    wait_for(20, "the status once connected", || async {
+        (portal.last().as_deref() == Some("Connected")).then_some(())
+    })
+    .await;
+
+    let wade = TestDaemon::start().await.unwrap();
+    let (_, wade_account) = wade.add_local("wade").await;
+    let chat = wade
+        .conversation(wade_account.start_chat("vera@localhost").await.unwrap())
+        .await;
+    chat.set_encryption_wanted(false).await.unwrap();
+    chat.send("Are you there?", HashMap::new()).await.unwrap();
+    wait_for(20, "the unread message in the status", || async {
+        (portal.last().as_deref() == Some("1 unread message")).then_some(())
+    })
+    .await;
+    // Read: back to connected.
+    let c = vera
+        .conversation_with(&vera_path, "wade@localhost")
+        .await
+        .unwrap();
+    vera.conversation(c).await.mark_read().await.unwrap();
+    wait_for(20, "the status after reading", || async {
+        (portal.last().as_deref() == Some("Connected")).then_some(())
+    })
+    .await;
+}

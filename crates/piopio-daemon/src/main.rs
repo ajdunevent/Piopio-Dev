@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     let settings = settings::load(store.clone()).await;
     let (quit_tx, mut quit_rx) = watch::channel(false);
-    let accounts = Arc::new(Mutex::new(daemon::Accounts::new(store)));
+    let accounts = Arc::new(Mutex::new(daemon::Accounts::new(store.clone())));
 
     let connection = zbus::connection::Builder::session()?
         .serve_at(
@@ -86,6 +86,11 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(background::apply(
         connection.clone(),
         settings.start_at_login(),
+    ));
+    tokio::spawn(background::keep_status(
+        connection.clone(),
+        store.clone(),
+        accounts.clone(),
     ));
     // Without Run in Background, closing the window ends the daemon too.
     if let Some(mut window) = activity::subscribe() {

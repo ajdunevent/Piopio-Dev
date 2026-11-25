@@ -416,6 +416,18 @@ impl Store {
         .await
     }
 
+    /// Unread messages in every conversation that isn't muted.
+    pub async fn total_unread(&self) -> anyhow::Result<u64> {
+        self.with(|db| {
+            Ok(db.query_row(
+                "SELECT COALESCE(SUM(unread), 0) FROM conversations WHERE muted != 'always'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? as u64)
+        })
+        .await
+    }
+
     pub async fn accounts(&self) -> anyhow::Result<Vec<AccountRow>> {
         self.with(|db| {
             let mut q = db.prepare(

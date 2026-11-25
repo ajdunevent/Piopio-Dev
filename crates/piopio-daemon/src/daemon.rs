@@ -43,6 +43,11 @@ impl Accounts {
         Ok(())
     }
 
+    /// Every account's object path.
+    pub fn paths(&self) -> Vec<OwnedObjectPath> {
+        self.by_jid.values().map(|a| a.path.clone()).collect()
+    }
+
     /// Disconnects every account cleanly.
     pub async fn stop_all(&mut self) {
         for (_, account) in self.by_jid.drain() {

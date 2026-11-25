@@ -59,7 +59,9 @@ difference, and OMEMO is on from the first message.
   signalling; the media (Opus, VP8) runs in the window through GStreamer's
   webrtcbin, in `piopio-call`.
 - **Background and notifications:** the daemon runs with no window, can
-  start at login (the Background portal inside Flatpak), and notifies of
+  start at login (the Background portal inside Flatpak, where GNOME's
+  Background Apps list also shows its status: connecting, can't connect,
+  or how many messages are unread), and notifies of
   new messages in every conversation but the one you're reading (group
   chats: all messages or only mentions, as each chooses; new ones start at
   mentions), withdrawn once read anywhere. A conversation can override
