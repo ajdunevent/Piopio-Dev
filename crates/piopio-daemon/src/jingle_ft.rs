@@ -435,7 +435,7 @@ async fn offered(session: &Session, peer: FullJid, sid: String, payload: Element
         accepted: None,
         finished: false,
     };
-    crate::notify::message(session, &path, &row).await;
+    crate::notify::message(session, &path, &row, true).await;
 
     let transport = match ibb {
         Some(ibb) => {

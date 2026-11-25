@@ -63,6 +63,8 @@ pub struct Window {
     entries: RefCell<HashMap<String, Entry>>,
     pub accounts: RefCell<Vec<Rc<AccountInfo>>>,
     open: RefCell<Option<(String, Rc<ChatPage>)>>,
+    /// What the daemon was last told the user is reading.
+    viewing: RefCell<String>,
     /// Shown when no conversation is open.
     placeholder: adw::NavigationPage,
 }
@@ -203,6 +205,7 @@ impl Window {
             entries: RefCell::new(HashMap::new()),
             accounts: RefCell::new(Vec::new()),
             open: RefCell::new(None),
+            viewing: RefCell::default(),
             placeholder,
         });
 
@@ -257,8 +260,35 @@ impl Window {
             && (!self.split.is_collapsed() || self.split.shows_content())
     }
 
+    /// Tells the daemon which conversation is in front of the user, so it
+    /// notifies for every other one (and for this one once it isn't).
+    fn report_viewing(&self) {
+        let key = self
+            .open
+            .borrow()
+            .as_ref()
+            .map(|(k, _)| k.clone())
+            .filter(|k| self.reading(k))
+            .unwrap_or_default();
+        if *self.viewing.borrow() == key {
+            return;
+        }
+        self.viewing.replace(key.clone());
+        glib::spawn_future_local(async move {
+            let _ = run(async move {
+                let bus = client::bus().await?;
+                piopio_dbus::DaemonProxy::new(&bus)
+                    .await?
+                    .set_viewing(&key)
+                    .await
+            })
+            .await;
+        });
+    }
+
     /// Marks the open conversation read if it has just come into view.
     fn read_open_conversation(&self) {
+        self.report_viewing();
         let Some(key) = self.open.borrow().as_ref().map(|(k, _)| k.clone()) else {
             return;
         };
@@ -861,6 +891,7 @@ impl Window {
         let was_open = self.open.borrow().as_ref().is_some_and(|(k, _)| k == key);
         if was_open {
             self.open.borrow_mut().take();
+            self.report_viewing();
             self.split.set_content(Some(&self.placeholder));
             self.split.set_show_content(false);
         }
@@ -915,6 +946,7 @@ impl Window {
             self.list.select_row(Some(&entry.row));
         }
         *self.open.borrow_mut() = Some((path.to_owned(), page));
+        self.report_viewing();
     }
 }
 

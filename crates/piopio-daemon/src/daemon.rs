@@ -216,6 +216,18 @@ impl Daemon {
         }
     }
 
+    /// Which conversation (object path) the window has in front of the
+    /// user, or "" for none. Its new messages need no notification.
+    fn set_viewing(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        conversation: String,
+    ) -> zbus::fdo::Result<()> {
+        access::check(&header)?;
+        crate::activity::set_viewing(conversation);
+        Ok(())
+    }
+
     /// Version of this interface. A breaking change creates `net.dunevent.Piopio.Daemon.v2`.
     #[zbus(property)]
     fn api_version(&self) -> u32 {

@@ -77,10 +77,16 @@ impl Conversations {
         if let Some(found) = self.by_peer.lock().await.get(peer.as_str()) {
             return Ok(found.clone());
         }
-        let (row, created) = session
+        let (mut row, created) = session
             .store
             .conversation(session.account_id, peer.to_string(), kind)
             .await?;
+        // A new group chat notifies only when you're mentioned, until you
+        // choose All Messages in its details.
+        if created && kind == "room" {
+            row.muted = "mentions".into();
+            let _ = session.store.update_conversation(row.clone()).await;
+        }
         let found = self.export(session, row).await?;
         // Someone new wrote: their picture, which no notification brings
         // unless they're a contact.
@@ -732,7 +738,7 @@ async fn handle(
         && !outgoing
         && source != (Source::Archive { first_sync: true })
     {
-        crate::notify::message(session, &conversation, &row).await;
+        crate::notify::message(session, &conversation, &row, true).await;
     }
 }
 
@@ -1007,11 +1013,12 @@ async fn handle_room(
     {
         crate::rooms::saw_archive_id(session, room.as_str(), id).await;
     }
+    // Every message, or only mentions, as the room's Notifications says.
     if let Some((row, path)) = stored
-        && mentions_us
+        && !outgoing
         && !first_sync
     {
-        crate::notify::message(session, &path, &row).await;
+        crate::notify::message(session, &path, &row, mentions_us).await;
     }
 }
 
@@ -1544,6 +1551,7 @@ impl ConversationObject {
     pub fn notification_style(&self) -> crate::notify::Style {
         crate::notify::Style {
             muted: self.row.muted == "always",
+            mentions_only: self.row.muted == "mentions",
             override_quiet: self.row.override_quiet,
         }
     }

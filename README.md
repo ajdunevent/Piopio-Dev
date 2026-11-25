@@ -59,9 +59,10 @@ difference, and OMEMO is on from the first message.
   signalling; the media (Opus, VP8) runs in the window through GStreamer's
   webrtcbin, in `piopio-call`.
 - **Background and notifications:** the daemon runs with no window, can
-  start at login (the Background portal inside Flatpak), and shows
-  notifications while no window is open (in group chats only when you're
-  mentioned), withdrawn once read anywhere. A conversation can override
+  start at login (the Background portal inside Flatpak), and notifies of
+  new messages in every conversation but the one you're reading (group
+  chats: all messages or only mentions, as each chooses; new ones start at
+  mentions), withdrawn once read anywhere. A conversation can override
   Do Not Disturb, including feedbackd's Quiet and Silent modes on phones.
 - **Window:** a conversation list after Dino's (pictures, times that follow
   the desktop's 12/24-hour setting, pinned and muted marks, typing,

@@ -77,6 +77,9 @@ pub trait Daemon {
     #[zbus(property)]
     fn set_warn_on_quit(&self, on: bool) -> zbus::Result<()>;
 
+    /// The conversation the window shows a focused user ("" for none).
+    fn set_viewing(&self, conversation: &str) -> zbus::Result<()>;
+
     /// Version of this interface.
     #[zbus(property)]
     fn api_version(&self) -> zbus::Result<u32>;

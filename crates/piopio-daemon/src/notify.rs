@@ -24,17 +24,28 @@ const NOTIFICATION: &str = "org.freedesktop.portal.Notification";
 /// What a conversation's notifications do.
 pub struct Style {
     pub muted: bool,
+    /// A group chat that notifies only when you're mentioned.
+    pub mentions_only: bool,
     pub override_quiet: bool,
 }
 
-pub async fn message(session: &Session, conversation: &OwnedObjectPath, row: &MessageRow) {
-    if crate::activity::ui_present() {
-        return; // the window shows it
+/// `mentioned`: whether a group message mentions us (always true for
+/// one-to-one messages).
+pub async fn message(
+    session: &Session,
+    conversation: &OwnedObjectPath,
+    row: &MessageRow,
+    mentioned: bool,
+) {
+    // Only the conversation being read needs none: with the window in the
+    // background, or on another conversation, messages still notify.
+    if crate::activity::viewing(conversation.as_str()) {
+        return;
     }
     let Some(style) = style(session, conversation).await else {
         return;
     };
-    if style.muted {
+    if style.muted || (style.mentions_only && !mentioned) {
         return;
     }
     // Do not disturb (our own status) means it, unless this conversation
