@@ -1,8 +1,7 @@
-//! Preferences: running in the background and at login, the notification
-//! sound, and each account's typing notifications and read receipts (which
-//! conversations can override in their details).
+//! Preferences: running in the background and at login, each account's
+//! typing notifications and read receipts (which conversations can override
+//! in their details), and blocked contacts.
 
-use std::cell::Cell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -12,183 +11,6 @@ use piopio_dbus::DaemonProxy;
 
 use crate::client::{self, run};
 use crate::window::Window;
-
-/// Where a sound row's choice goes: the app's default or a conversation's.
-#[derive(Clone)]
-pub enum SoundTarget {
-    App(DaemonProxy<'static>),
-    Conversation(piopio_dbus::ConversationProxy<'static>),
-}
-
-impl SoundTarget {
-    async fn set(&self, value: &'static str) -> zbus::Result<()> {
-        match self {
-            SoundTarget::App(p) => p.set_notification_sound(value).await,
-            SoundTarget::Conversation(p) => p.set_notification_sound(value).await,
-        }
-    }
-
-    async fn test(&self) -> zbus::Result<()> {
-        match self {
-            SoundTarget::App(p) => p.test_notification_sound().await,
-            SoundTarget::Conversation(p) => p.test_notification_sound().await,
-        }
-    }
-
-    async fn set_custom(&self, file: std::fs::File) -> zbus::Result<()> {
-        let fd = zbus::zvariant::Fd::from(&file);
-        match self {
-            SoundTarget::App(p) => p.set_custom_sound(fd).await,
-            SoundTarget::Conversation(p) => p.set_custom_sound(fd).await,
-        }
-    }
-}
-
-/// A row choosing a notification sound: the first choice ("Desktop Default"
-/// for the app, "Default" for a conversation), None, or a file of one's own.
-pub fn sound_row(
-    window: &Rc<Window>,
-    first: &str,
-    current: &str,
-    target: SoundTarget,
-) -> adw::ComboRow {
-    let row = adw::ComboRow::builder()
-        .title("Notification Sound")
-        .model(&gtk::StringList::new(&[first, "None", "Custom…"]))
-        .build();
-    let index = match current {
-        "silent" => 1,
-        "custom" => 2,
-        _ => 0,
-    };
-    row.set_selected(index);
-    let change = gtk::Button::builder()
-        .label("Change…")
-        .valign(gtk::Align::Center)
-        .visible(index == 2)
-        .build();
-    row.add_suffix(&change);
-    // Hear it: a test notification with the sound, taken back shortly.
-    let play = gtk::Button::builder()
-        .icon_name("media-playback-start-symbolic")
-        .tooltip_text("Play Sound")
-        .valign(gtk::Align::Center)
-        .css_classes(["flat", "circular"])
-        .build();
-    row.add_suffix(&play);
-    {
-        let (target, r) = (target.clone(), row.downgrade());
-        play.connect_clicked(move |_| {
-            let (target, r) = (target.clone(), r.clone());
-            let Some(row) = r.upgrade() else { return };
-            if row.selected() == 1 {
-                toast_near(&row, "No sound: these notifications are silent");
-                return;
-            }
-            glib::spawn_future_local(async move {
-                if let Err(e) = run(async move { target.test().await }).await
-                    && let Some(row) = r.upgrade()
-                {
-                    toast_near(&row, &client::explain(&e));
-                }
-            });
-        });
-    }
-    let previous = Rc::new(Cell::new(index));
-
-    let pick = {
-        let (window, row, target, previous, change) = (
-            window.clone(),
-            row.clone(),
-            target.clone(),
-            previous.clone(),
-            change.clone(),
-        );
-        Rc::new(move || {
-            let filter = gtk::FileFilter::new();
-            filter.add_mime_type("audio/*");
-            filter.set_name(Some("Sounds"));
-            let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
-            filters.append(&filter);
-            let chooser = gtk::FileDialog::builder()
-                .title("Choose a Sound")
-                .filters(&filters)
-                .build();
-            let (w, row, target, previous, change) = (
-                window.clone(),
-                row.clone(),
-                target.clone(),
-                previous.clone(),
-                change.clone(),
-            );
-            chooser.open(
-                Some(&window.window),
-                gtk::gio::Cancellable::NONE,
-                move |result| {
-                    let Some(path) = result.ok().and_then(|f| f.path()) else {
-                        // Cancelled: back to what it was.
-                        row.set_selected(previous.get());
-                        return;
-                    };
-                    let (w, row, target, previous, change) = (
-                        w.clone(),
-                        row.clone(),
-                        target.clone(),
-                        previous.clone(),
-                        change.clone(),
-                    );
-                    glib::spawn_future_local(async move {
-                        let set = run(async move {
-                            let file = std::fs::File::open(&path).map_err(|e| {
-                                zbus::Error::Failure(format!("can't read the sound: {e}"))
-                            })?;
-                            target.set_custom(file).await
-                        })
-                        .await;
-                        match set {
-                            Ok(()) => {
-                                previous.set(2);
-                                change.set_visible(true);
-                            }
-                            Err(e) => {
-                                row.set_selected(previous.get());
-                                w.toast(&client::explain(&e));
-                            }
-                        }
-                    });
-                },
-            );
-        })
-    };
-    {
-        let pick = pick.clone();
-        change.connect_clicked(move |_| pick());
-    }
-    let w = Rc::downgrade(window);
-    row.connect_selected_notify(move |row| {
-        let selected = row.selected();
-        if selected == previous.get() {
-            return;
-        }
-        if selected == 2 {
-            pick();
-            return;
-        }
-        previous.set(selected);
-        change.set_visible(false);
-        let target = target.clone();
-        let value = if selected == 1 { "silent" } else { "default" };
-        let w = w.clone();
-        glib::spawn_future_local(async move {
-            if let Err(e) = run(async move { target.set(value).await }).await
-                && let Some(w) = w.upgrade()
-            {
-                w.toast(&client::explain(&e));
-            }
-        });
-    });
-    row
-}
 
 /// A toast in the dialog `widget` is in (the window's would be hidden
 /// behind it).
@@ -209,15 +31,13 @@ pub fn show(window: &Rc<Window>) {
             let daemon = DaemonProxy::new(&bus).await?;
             let background = daemon.run_in_background().await?;
             let login = daemon.start_at_login().await?;
-            let sound = daemon.notification_sound().await?;
             let warn = daemon.warn_on_quit().await.unwrap_or(true);
-            Ok::<_, zbus::Error>((daemon, background, login, sound, warn))
+            Ok::<_, zbus::Error>((daemon, background, login, warn))
         })
         .await;
         match loaded {
-            Ok((daemon, background, login, sound, warn)) => {
-                build(&window, daemon, background, login, &sound, warn)
-                    .present(Some(&window.window));
+            Ok((daemon, background, login, warn)) => {
+                build(&window, daemon, background, login, warn).present(Some(&window.window));
             }
             Err(e) => window.toast(&client::explain(&e)),
         }
@@ -229,7 +49,6 @@ fn build(
     daemon: DaemonProxy<'static>,
     background: bool,
     login: bool,
-    sound: &str,
     warn: bool,
 ) -> adw::PreferencesDialog {
     let dialog = adw::PreferencesDialog::builder()
@@ -305,25 +124,12 @@ fn build(
         });
     }
 
-    let notifications = adw::PreferencesGroup::builder()
-        .title("Notifications")
-        .description("Conversations can choose their own sound in their details.")
-        .build();
-    notifications.add(&sound_row(
-        window,
-        "Desktop Default",
-        sound,
-        SoundTarget::App(daemon),
-    ));
-    page.add(&notifications);
-
     // Who's blocked, to unblock them: blocking also removes them from the
     // contacts and the conversation list, so this is where they are.
     let blocked = adw::PreferencesGroup::builder()
         .title("Blocked Contacts")
         .description("They can’t send you messages or see when you’re online.")
         .build();
-    page.add(&blocked);
     let shown: Rc<std::cell::RefCell<Vec<adw::ActionRow>>> = Rc::default();
     for account in window.accounts.borrow().iter().cloned() {
         let (group, shown, w) = (blocked.clone(), shown.clone(), Rc::downgrade(window));
@@ -444,5 +250,7 @@ fn build(
             });
         });
     }
+    // Last, below everything else.
+    page.add(&blocked);
     dialog
 }

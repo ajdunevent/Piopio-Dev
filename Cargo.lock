@@ -2300,7 +2300,6 @@ dependencies = [
  "piopio-omemo",
  "reqwest",
  "rusqlite",
- "rustix",
  "rustls",
  "sasl",
  "serde",

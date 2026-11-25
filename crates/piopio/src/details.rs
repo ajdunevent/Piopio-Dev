@@ -31,7 +31,6 @@ struct Loaded {
     chat_states: String,
     receipts: String,
     blocked: bool,
-    sound: String,
     override_quiet: bool,
     /// The account's defaults for typing notifications and read receipts.
     default_chat_states: bool,
@@ -90,10 +89,6 @@ async fn load(
                 .unwrap_or_else(|_| "default".into()),
             receipts: c.send_receipts().await.unwrap_or_else(|_| "default".into()),
             blocked: c.blocked().await.unwrap_or(false),
-            sound: c
-                .notification_sound()
-                .await
-                .unwrap_or_else(|_| "default".into()),
             override_quiet: c.override_quiet().await.unwrap_or(false),
             default_chat_states: proxy.send_chat_states().await.unwrap_or(true),
             default_receipts: proxy.send_receipts().await.unwrap_or(true),
@@ -365,15 +360,10 @@ fn build(
     }
     page.add(&settings);
 
-    notifications.add(&crate::prefs::sound_row(
-        window,
-        "Default",
-        &d.sound,
-        crate::prefs::SoundTarget::Conversation(proxy.clone()),
-    ));
+    // All of this conversation's notifications, not only calls.
     let urgent = adw::SwitchRow::builder()
-        .title("Ring Through Do Not Disturb")
-        .subtitle("Also through Quiet and Silent on phones")
+        .title("Override Do Not Disturb")
+        .subtitle("Includes Quiet and Silent modes")
         .active(d.override_quiet)
         .build();
     {
@@ -504,22 +494,12 @@ fn contact_group(
     }
     group.add(&name);
 
-    let subscription = d
-        .contact
-        .as_ref()
-        .map(|c| text(c, "subscription"))
-        .unwrap_or_else(|| "none".to_owned());
-    let listed = adw::ActionRow::builder()
-        .title("Contact List")
-        .subtitle(match (d.contact.is_some(), subscription.as_str()) {
-            (false, _) => "Not in your contacts",
-            (true, "both") => "You see when each other is online",
-            (true, "to") => "You see when they’re online",
-            (true, "from") => "They see when you’re online",
-            (true, _) => "In your contacts",
-        })
-        .build();
+    // Only for someone who isn't a contact yet: adding them shares
+    // online status both ways and keeps them on your other devices.
     if d.contact.is_none() {
+        let listed = adw::ActionRow::builder()
+            .title("Not in Your Contacts")
+            .build();
         let add = gtk::Button::builder()
             .label("Add")
             .valign(gtk::Align::Center)
@@ -532,12 +512,12 @@ fn contact_group(
         );
         add.connect_clicked(move |b| {
             b.set_sensitive(false);
-            row.set_subtitle("Asked to see each other online");
+            row.set_title("Added to Your Contacts");
             let (roster, peer) = (roster.clone(), peer.clone());
             apply(&w, async move { roster.add_contact(&peer, "", &[]).await });
         });
         listed.add_suffix(&add);
+        group.add(&listed);
     }
-    group.add(&listed);
     group
 }

@@ -1544,9 +1544,7 @@ impl ConversationObject {
     pub fn notification_style(&self) -> crate::notify::Style {
         crate::notify::Style {
             muted: self.row.muted == "always",
-            sound: self.row.notification_sound.clone(),
             override_quiet: self.row.override_quiet,
-            conversation_id: self.row.id,
         }
     }
 
@@ -1839,56 +1837,8 @@ impl ConversationObject {
         self.session.blocked.contains(&self.row.peer).await
     }
 
-    /// "default" (the app's sound), "silent" or "custom" (set with
-    /// SetNotificationSound). Writable with "default" or "silent".
-    #[zbus(property)]
-    fn notification_sound(&self) -> String {
-        self.row.notification_sound.clone()
-    }
-
-    #[zbus(property)]
-    async fn set_notification_sound(&mut self, value: String) -> zbus::fdo::Result<()> {
-        if !matches!(value.as_str(), "default" | "silent") {
-            return Err(zbus::fdo::Error::InvalidArgs(
-                "default or silent; a custom sound is set with SetNotificationSound".into(),
-            ));
-        }
-        self.row.notification_sound = value;
-        self.save().await;
-        Ok(())
-    }
-
-    /// Plays this sound file (read from `file`, at most 2 MiB) for this
-    /// conversation's notifications.
-    async fn set_custom_sound(
-        &mut self,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-        #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
-        file: zbus::zvariant::OwnedFd,
-    ) -> zbus::fdo::Result<()> {
-        access::check(&header)?;
-        crate::settings::save_sound(self.row.id.to_string(), file.into())
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(format!("{e:#}")))?;
-        self.row.notification_sound = "custom".into();
-        self.save().await;
-        let _ = self.notification_sound_changed(&emitter).await;
-        Ok(())
-    }
-
-    /// Plays this conversation's notification sound (through a test
-    /// notification that is taken back after a few seconds).
-    async fn test_notification_sound(
-        &self,
-        #[zbus(header)] header: zbus::message::Header<'_>,
-    ) -> zbus::fdo::Result<()> {
-        access::check(&header)?;
-        let (sound, file) = crate::notify::sound_of(&self.notification_style());
-        crate::notify::test(&self.session.bus, &sound, file).await
-    }
-
-    /// Whether notifications ring through Do Not Disturb (GNOME) and the
-    /// Quiet and Silent profiles (Phosh). Writable.
+    /// Whether this conversation's notifications override Do Not Disturb
+    /// (GNOME) and the Quiet and Silent profiles (Phosh). Writable.
     #[zbus(property)]
     fn override_quiet(&self) -> bool {
         self.row.override_quiet

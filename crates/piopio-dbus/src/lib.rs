@@ -77,15 +77,6 @@ pub trait Daemon {
     #[zbus(property)]
     fn set_warn_on_quit(&self, on: bool) -> zbus::Result<()>;
 
-    /// "default", "silent" or "custom".
-    #[zbus(property)]
-    fn notification_sound(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn set_notification_sound(&self, value: &str) -> zbus::Result<()>;
-    fn set_custom_sound(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
-    /// Plays the sound, through a test notification taken back shortly.
-    fn test_notification_sound(&self) -> zbus::Result<()>;
-
     /// Version of this interface.
     #[zbus(property)]
     fn api_version(&self) -> zbus::Result<u32>;
@@ -308,16 +299,7 @@ pub trait Conversation {
     #[zbus(property)]
     fn peer_features(&self) -> zbus::Result<Vec<String>>;
 
-    /// "default" (the app's), "silent" or "custom".
-    #[zbus(property)]
-    fn notification_sound(&self) -> zbus::Result<String>;
-    #[zbus(property)]
-    fn set_notification_sound(&self, value: &str) -> zbus::Result<()>;
-    fn set_custom_sound(&self, file: zbus::zvariant::Fd<'_>) -> zbus::Result<()>;
-    /// Plays the sound, through a test notification taken back shortly.
-    fn test_notification_sound(&self) -> zbus::Result<()>;
-
-    /// Ring through Do Not Disturb and quiet modes.
+    /// Override Do Not Disturb and quiet modes.
     #[zbus(property)]
     fn override_quiet(&self) -> zbus::Result<bool>;
     #[zbus(property)]

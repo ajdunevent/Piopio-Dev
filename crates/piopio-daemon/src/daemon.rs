@@ -216,62 +216,6 @@ impl Daemon {
         }
     }
 
-    /// The default notification sound: "default" (the desktop's),
-    /// "silent" or "custom" (set with SetNotificationSound). Writable with
-    /// "default" or "silent".
-    #[zbus(property)]
-    fn notification_sound(&self) -> String {
-        crate::settings::get()
-            .map(|s| s.sound())
-            .unwrap_or_else(|| "default".into())
-    }
-
-    #[zbus(property)]
-    async fn set_notification_sound(&mut self, value: String) -> zbus::fdo::Result<()> {
-        if !matches!(value.as_str(), "default" | "silent") {
-            return Err(zbus::fdo::Error::InvalidArgs(
-                "default or silent; a custom sound is set with SetCustomSound".into(),
-            ));
-        }
-        if let Some(s) = crate::settings::get() {
-            s.set_sound(&value).await;
-        }
-        Ok(())
-    }
-
-    /// Plays the default notification sound (through a test notification
-    /// that is taken back after a few seconds).
-    async fn test_notification_sound(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(connection)] connection: &zbus::Connection,
-    ) -> zbus::fdo::Result<()> {
-        access::check(&header)?;
-        let sound = crate::settings::get()
-            .map(|s| s.sound())
-            .unwrap_or_else(|| "default".into());
-        let file = (sound == "custom").then(|| crate::settings::sound_file("default"));
-        crate::notify::test(connection, &sound, file).await
-    }
-
-    /// Plays this sound file (at most 2 MiB) for notifications by default.
-    async fn set_custom_sound(
-        &self,
-        #[zbus(header)] header: Header<'_>,
-        #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
-        file: zbus::zvariant::OwnedFd,
-    ) -> zbus::fdo::Result<()> {
-        access::check(&header)?;
-        crate::settings::save_sound("default".into(), file.into())
-            .await
-            .map_err(|e| zbus::fdo::Error::Failed(format!("{e:#}")))?;
-        if let Some(s) = crate::settings::get() {
-            s.set_sound("custom").await;
-        }
-        let _ = self.notification_sound_changed(&emitter).await;
-        Ok(())
-    }
-
     /// Version of this interface. A breaking change creates `net.dunevent.Piopio.Daemon.v2`.
     #[zbus(property)]
     fn api_version(&self) -> u32 {

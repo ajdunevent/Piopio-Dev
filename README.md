@@ -61,16 +61,15 @@ difference, and OMEMO is on from the first message.
 - **Background and notifications:** the daemon runs with no window, can
   start at login (the Background portal inside Flatpak), and shows
   notifications while no window is open (in group chats only when you're
-  mentioned), withdrawn once read anywhere. A notification sound for the
-  app and per conversation, with a preview, and per-conversation ringing
-  through Do Not Disturb and feedbackd's quiet modes.
+  mentioned), withdrawn once read anywhere. A conversation can override
+  Do Not Disturb, including feedbackd's Quiet and Silent modes on phones.
 - **Window:** a conversation list after Dino's (pictures, times that follow
   the desktop's 12/24-hour setting, pinned and muted marks, typing,
   previews), messages grouped by sender with delivery and read ticks, a
   padlock wherever a message isn't encrypted, a message box that grows
   with its Send button attached, Conversation Details (contact, display
-  name, encryption, pinning, muting, typing and read receipts, sound,
-  Block, Delete), Preferences, and a Quit that really quits; adapts down
+  name, encryption, pinning, muting, typing and read receipts, Block,
+  Delete), Preferences, and a Quit that really quits; adapts down
   to 360px. Features a contact's app doesn't support aren't offered.
 
 Not yet:
