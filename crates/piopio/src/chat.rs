@@ -318,6 +318,35 @@ impl ChatPage {
                 }
             });
         });
+        // Files (or a picture, as from a browser) dropped on the
+        // conversation offer to send them.
+        let drop = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::COPY);
+        drop.set_types(&[gdk::FileList::static_type(), gdk::Texture::static_type()]);
+        let weak = Rc::downgrade(&this);
+        drop.connect_drop(move |_, value, _, _| {
+            let Some(this) = weak.upgrade() else {
+                return false;
+            };
+            // Only where sharing files is possible at all.
+            if !this.attach.is_visible() || !this.attach.is_sensitive() {
+                return false;
+            }
+            if let Ok(list) = value.get::<gdk::FileList>() {
+                let paths: Vec<std::path::PathBuf> =
+                    list.files().iter().filter_map(|f| f.path()).collect();
+                if paths.is_empty() {
+                    return false;
+                }
+                this.offer_files(paths);
+                return true;
+            }
+            if let Ok(texture) = value.get::<gdk::Texture>() {
+                this.offer_image(texture);
+                return true;
+            }
+            false
+        });
+        this.page.add_controller(drop);
         entry.connect_activate({
             let do_send = do_send.clone();
             move || do_send()
@@ -1529,27 +1558,54 @@ impl ChatPage {
             move |result| {
                 let Ok(file) = result else { return };
                 let Some(path) = file.path() else { return };
-                let name = file
-                    .basename()
-                    .map(|b| b.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "file".into());
-                let (proxy, weak) = (proxy.clone(), weak.clone());
-                glib::spawn_future_local(async move {
-                    let sent = run(async move {
-                        let f = std::fs::File::open(&path).map_err(|e| {
-                            zbus::Error::Failure(format!("can't read the file: {e}"))
-                        })?;
-                        proxy
-                            .send_file(zbus::zvariant::Fd::from(&f), &name, HashMap::new())
-                            .await
-                    })
-                    .await;
-                    if let (Err(e), Some(w)) = (sent, weak.upgrade()) {
-                        w.toast(&format!("Not sent: {}", client::explain(&e)));
-                    }
-                });
+                send_path(proxy.clone(), weak.clone(), path);
             },
         );
+    }
+
+    /// Asks before sending dropped files, showing a single picture.
+    fn offer_files(self: &Rc<Self>, paths: Vec<std::path::PathBuf>) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let name_of = |p: &std::path::Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".into())
+        };
+        let (heading, body) = match paths.as_slice() {
+            [one] => (format!("Send “{}”?", name_of(one)), None),
+            many => (
+                format!("Send {} Files?", many.len()),
+                Some(
+                    many.iter()
+                        .map(|p| name_of(p))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+            ),
+        };
+        let ask = adw::AlertDialog::new(Some(&heading), body.as_deref());
+        if let [one] = paths.as_slice()
+            && let Ok(texture) = gdk::Texture::from_filename(one)
+        {
+            let picture = gtk::Picture::for_paintable(&texture);
+            picture.set_can_shrink(true);
+            picture.set_size_request(-1, 200);
+            ask.set_extra_child(Some(&picture));
+        }
+        ask.add_responses(&[("cancel", "_Cancel"), ("send", "_Send")]);
+        ask.set_response_appearance("send", adw::ResponseAppearance::Suggested);
+        ask.set_default_response(Some("send"));
+        let (proxy, weak) = (self.proxy.clone(), self.window.clone());
+        ask.connect_response(None, move |_, response| {
+            if response == "send" {
+                for path in &paths {
+                    send_path(proxy.clone(), weak.clone(), path.clone());
+                }
+            }
+        });
+        ask.present(Some(&window.window));
     }
 
     /// Reaction chips under a message; tapping one adds or removes ours.
@@ -2296,4 +2352,29 @@ fn state_name(state: &str) -> &'static str {
         "failed" => "Not sent",
         _ => "",
     }
+}
+
+/// Shares a file from disk in the conversation.
+fn send_path(
+    proxy: ConversationProxy<'static>,
+    weak: std::rc::Weak<Window>,
+    path: std::path::PathBuf,
+) {
+    let name = path
+        .file_name()
+        .map(|b| b.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    glib::spawn_future_local(async move {
+        let sent = run(async move {
+            let f = std::fs::File::open(&path)
+                .map_err(|e| zbus::Error::Failure(format!("can't read the file: {e}")))?;
+            proxy
+                .send_file(zbus::zvariant::Fd::from(&f), &name, HashMap::new())
+                .await
+        })
+        .await;
+        if let (Err(e), Some(w)) = (sent, weak.upgrade()) {
+            w.toast(&format!("Not sent: {}", client::explain(&e)));
+        }
+    });
 }
